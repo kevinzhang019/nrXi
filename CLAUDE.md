@@ -148,6 +148,30 @@ curl -s -H "Authorization: Bearer $KV_REST_API_TOKEN" "$KV_REST_API_URL/keys/wea
 
 **No cache flush required.** The bad data lived in `nrxi:snapshot` (24h TTL); the next watcher tick after deploy overwrites it. The `hand:{playerId}` keys were always correct — we just weren't reading them for the lineup. Finished games will be replaced by tomorrow's scheduler at 13:00 UTC, or expire naturally within 24h.
 
+### 8. Predictions stale within a half-inning + squared/missing-half full-inning at transitions
+
+**Symptom:** while a half-inning is in progress, the displayed P(no run) doesn't move as outs/bases change — a strikeout, walk, or single doesn't shift the value at all. At half-inning boundaries the card highlights via `isDecisionMoment` but the prediction either stays at the prior value or jumps to a clearly wrong number (notably squared or missing one half).
+
+**Root causes:**
+1. **Recompute trigger only fired on inning/half boundaries.** The old `shouldRecompute` keyed off `inningKey = "${inning}-${half}-${(outs ?? 0) >= 3 ? "end" : inningState}"`. Outs going 1→2 or bases changing under 3 outs did NOT change `inningKey`, so `lastNrXi` stayed pinned at the value computed at the start of the half-inning.
+2. **Full-inning composition used raw `half` from `ls.isTopInning` instead of `upcoming.half`.** At end of TOP of N, raw `half==="Top"` but `upcoming.half==="Bottom"` (lineup.ts already flipped via `isMiddleOrEnd`); the code multiplied `lastNrXi.pNoHitEvent × oppHalf.pNoHitEvent` where both equaled P(bottom of N clean) — producing a squared value. At end of BOTTOM of N, raw `half==="Bottom"` but `upcoming.half==="Top"` of N+1; the `else if (half === "Bottom")` branch silently dropped the bottom-of-N+1 factor.
+3. **`readMarkovStartState` only clamped outs.** With `outs===3`, outs was clamped to 0 but bases were still read from `ls.offense`, leaking stranded runners from the just-ended half into the next-half compute.
+
+**Fix (all in `workflows/game-watcher.ts`):**
+1. Two-phase trigger. `structuralKey` = `${upcoming.half}|${upcoming.inning}|${lh}|${dk}|${op}|${atBat}` — fires heavy reload (splits/park/weather/defense, the two `loadLineupSplitsStep` bundles, both `computeLineupStatsStep`, and `oppHalfClean` via `computeNrXiStep`) only on half-inning / lineup / defense / opp-pitcher / at-bat changes. `playStateKey` = `${outs}-${bases}-${atBatIndex}` — fires the per-PA `computeNrXiStep` recompute against the live startState, reusing the cached non-state inputs.
+2. `oppHalfCleanCache` is hoisted to workflow scope and recomputed ONLY in the structural-reload phase. Phase 2 reads it for full-inning composition keyed off `upcoming.half` (not raw `half`), which fixes both transition bugs.
+3. `readMarkovStartState` short-circuits to `{outs: 0, bases: 0}` when `inningState` is `middle`/`end` OR `outs >= 3`. The predicate mirrors `isMiddleOrEnd` in `lib/mlb/lineup.ts:26` so the Markov startState is consistent with which half `upcoming` has flipped to.
+4. The at-bat batter id is in `structuralKey` because `upcoming.upcomingBatterIds` rotates by one per PA — without invalidating the splits cache on rotation, the Markov chain models the wrong starting batter. Per-batter PA profiles hit the 12h Redis cache on reload, and workflow step result-caching dedupes `computeLineupStatsStep` / `oppHalfClean` across rotations within the same half (their inputs don't change).
+
+**Don't change without thinking:**
+- The split between `structuralKey` and `playStateKey`. Folding them back into a single key forces lineupStats / oppHalfClean to recompute every PA (still correct via step caching, but wasteful and obscures the "heavy vs cheap" intent).
+- Using `upcoming.half` (NOT raw `half`) in the full-inning composition AND in `lineupStats` defensive-alignment gating. Reverting reintroduces the squared bug at end-of-top and the missing-half bug at end-of-bottom.
+- Including `atBat` (= `upcoming.upcomingBatterIds[0]`) in `structuralKey`. Without it, the Markov chain runs a stale batter sequence between PAs because `splitsCache.batters` order is frozen at the previous reload.
+- Including `atBatIndex` in `playStateKey`. A solo HR with empty bases keeps `(outs, bases)` constant but ticks `atBatIndex` (and the upcoming sequence rotates) — without it, the recompute would skip a meaningful state change.
+- The `isHalfOver` short-circuit in `readMarkovStartState`. Reverting to outs-only clamping reintroduces phantom-stranded-runners in the next-half compute.
+
+**No cache flush required.** Stale snapshots overwrite on the next watcher tick.
+
 ## MLB Stats API gotchas
 
 - **Live feed lives at `/api/v1.1/...`**, not `/api/v1/...`. v1 returns 404 for the same path.

@@ -19,10 +19,20 @@ import type { Bases, GameState as MarkovState } from "@/lib/prob/markov";
 
 // Read live (outs, bases) from the MLB feed. Bases use the canonical 3-bit
 // encoding shared with the Markov chain (bit0=1st, bit1=2nd, bit2=3rd).
+//
+// Half-boundary short-circuit: when the feed indicates the half-inning is
+// over (inningState is "middle"/"end" OR outs >= 3), force {0, 0}. This
+// mirrors the isMiddleOrEnd predicate in lib/mlb/lineup.ts:26 — that predicate
+// already flips `upcoming` to the next half-inning, so the Markov startState
+// must agree (no phantom stranded runners from `ls.offense` polluting the
+// next-half compute).
 function readMarkovStartState(feed: LiveFeed): MarkovState {
   const ls = feed.liveData.linescore;
   const o = ls.outs ?? 0;
-  const outs = (o >= 3 ? 0 : o) as 0 | 1 | 2; // mid-change-of-innings: outs may briefly hit 3
+  const inningState = (ls.inningState || "").toLowerCase();
+  const isHalfOver = inningState === "middle" || inningState === "end" || o >= 3;
+  if (isHalfOver) return { outs: 0, bases: 0 };
+  const outs = o as 0 | 1 | 2;
   const off = ls.offense ?? {};
   const b1 = off.first?.id ? 1 : 0;
   const b2 = off.second?.id ? 2 : 0;
@@ -136,15 +146,28 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
 
   let lastTimecode: string | null = null;
   let prevDoc: LiveFeed | null = null;
-  let lastInningKey = "";
-  let lastLineupHash = "";
-  let lastDefenseKey = "";
   // Cached enriched lineups + the lineup hash they were enriched from. We
   // hydrate batter handedness from /people/{id} (via loadHand, 30d Redis TTL)
   // because the live-feed boxscore omits batSide for most players. Recomputed
   // only when the boxscore battingOrder changes (sub or starter swap).
   let lastEnrichedHash = "";
   let lastLineups: Awaited<ReturnType<typeof enrichLineupHandsStep>> | null = null;
+  // Two-phase trigger state. structuralKey covers things that change at half-
+  // inning / lineup / defense / opposing-pitcher boundaries — heavy reload
+  // (network + lineupStats compute). playStateKey covers per-PA changes
+  // (outs/bases/atBatIndex) — fast Markov recompute only. Splitting them lets
+  // the prediction refresh on every plate-appearance outcome without re-
+  // fetching cached splits/park/weather/defense or recomputing display-only
+  // xOBP/xSLG that don't depend on game state.
+  let lastStructuralKey = "";
+  let lastPlayStateKey = "";
+  let splitsCache: Awaited<ReturnType<typeof loadLineupSplitsStep>> | null = null;
+  let parkCache: Awaited<ReturnType<typeof loadParkFactorStep>> | null = null;
+  let weatherCache: Awaited<ReturnType<typeof loadWeatherStep>> | null = null;
+  let defenseCache: Awaited<ReturnType<typeof loadDefenseStep>> | null = null;
+  // Pre-computed P(no run) for the opposite half-inning starting clean. Only
+  // populated when upcoming.half === "Top" (used to compose full-inning).
+  let oppHalfCleanCache: { pHitEvent: number; pNoHitEvent: number } | null = null;
   let lastNrXi: Awaited<ReturnType<typeof computeNrXiStep>> | null = null;
   let lastEnv: { parkRunFactor: number; weatherRunFactor: number; weather?: Record<string, unknown> } | null = null;
   let lastPitcherId: number | null = null;
@@ -161,7 +184,6 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
   // either team. Hoisted to workflow scope (bug #5/#7 pattern) so it persists
   // across non-recompute ticks.
   let lastLineupStats: GameState["lineupStats"] = null;
-  let lastOppPitcherHash = "";
 
   for (let loop = 0; loop < MAX_LOOPS; loop++) {
     const tick = await fetchLiveDiffStep({
@@ -183,7 +205,6 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
     const outs = ls.outs ?? null;
     const inningState = ls.inningState ?? "";
 
-    const inningKey = `${inning}-${half}-${(outs ?? 0) >= 3 ? "end" : inningState || "live"}`;
     const lh = lineupHash(
       tick.feed.liveData.boxscore?.teams.home.battingOrder,
       tick.feed.liveData.boxscore?.teams.away.battingOrder,
@@ -194,25 +215,50 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
     const bothPitchers = readBothPitchers(tick.feed);
     const op = `${bothPitchers.awayPitcherId ?? "_"}-${bothPitchers.homePitcherId ?? "_"}`;
 
-    const shouldRecompute =
-      status === "Live" &&
-      upcoming !== null &&
-      upcoming.pitcherId !== null &&
-      (inningKey !== lastInningKey ||
-        lh !== lastLineupHash ||
-        dk !== lastDefenseKey ||
-        op !== lastOppPitcherHash);
+    // Structural key — half-inning / lineup / defense / opposing-pitcher
+    // boundaries, plus the current at-bat batter id. Uses upcoming.half (NOT
+    // raw `half` from ls.isTopInning) so half-end transitions cleanly
+    // invalidate the cache: lineup.ts already flips upcoming to the next half
+    // when isMiddleOrEnd, which means raw `half` lags upcoming.half by one
+    // tick at end-of-half.
+    //
+    // The at-bat batter id is included because upcoming.upcomingBatterIds
+    // rotates by one position per PA (batter at front moves to back), and the
+    // Markov chain models the chain starting from upcomingBatterIds[0]. Without
+    // refreshing splitsCache.batters on rotation, the chain models the wrong
+    // batter sequence after each PA. Reload is cheap: per-batter PA profiles
+    // hit the 12h Redis cache, and the (input-keyed) workflow step result
+    // cache dedupes computeLineupStatsStep / oppHalfClean across rotations
+    // within the same half.
+    const atBat = upcoming?.upcomingBatterIds[0] ?? "_";
+    const structuralKey = `${upcoming?.half ?? "_"}|${upcoming?.inning ?? "_"}|${lh}|${dk}|${op}|${atBat}`;
+    // Play-state key — outs, bases, and atBatIndex. atBatIndex captures
+    // PA-boundary changes that don't move outs/bases (e.g., a solo HR with
+    // empty bases rotates the next batter without changing the Markov state).
+    const atBatIndex = tick.feed.liveData.plays?.currentPlay?.about?.atBatIndex ?? -1;
+    const startStatePeek = readMarkovStartState(tick.feed);
+    const playStateKey = `${startStatePeek.outs}-${startStatePeek.bases}-${atBatIndex}`;
+
+    const isLive =
+      status === "Live" && upcoming !== null && upcoming.pitcherId !== null;
+    const shouldReloadStructure = isLive && structuralKey !== lastStructuralKey;
+    const shouldRecomputePlay =
+      isLive && (shouldReloadStructure || playStateKey !== lastPlayStateKey);
 
     console.log(
       "[watcher] tick",
       JSON.stringify({
         gamePk: input.gamePk,
         status,
-        inningKey,
+        inning,
+        half,
+        outs,
+        inningState,
         upcoming: upcoming
           ? { pitcherId: upcoming.pitcherId, batters: upcoming.upcomingBatterIds.length }
           : null,
-        shouldRecompute,
+        shouldReloadStructure,
+        shouldRecomputePlay,
       }),
     );
 
@@ -230,7 +276,13 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       lastEnrichedHash = lh;
     }
 
-    if (shouldRecompute && upcoming) {
+    // ---- Phase 1: structural reload (heavy) ----
+    // Fires only when the half-inning, lineup, defense alignment, or opposing
+    // pitcher changes. Reloads splits/park/weather/defense, recomputes the
+    // display-only xOBP/xSLG for both teams, and pre-computes the clean
+    // opposite-half P(no run) used to compose full-inning. None of this
+    // depends on outs/bases — those drive Phase 2 instead.
+    if (shouldReloadStructure && upcoming) {
       const [splits, park, weather, defense] = await Promise.all([
         loadLineupSplitsStep({
           gamePk: input.gamePk,
@@ -249,21 +301,11 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
         }),
         loadDefenseStep({ gamePk: input.gamePk, season: SEASON }),
       ]);
-      const startState = readMarkovStartState(tick.feed);
-      const paInGameForPitcher = readPaInGameForPitcher(tick.feed, upcoming.pitcherId!);
-      lastNrXi = await computeNrXiStep({
-        gamePk: input.gamePk,
-        pitcher: splits.pitcher,
-        batters: splits.batters,
-        park: park.components,
-        weather: weather.components,
-        startState,
-        paInGameForPitcher,
-        oaaTable: defense.oaaTable,
-        framingTable: defense.framingTable,
-        catcherId: alignment.catcherId,
-        fielderIds: alignment.fielderIds,
-      });
+      splitsCache = splits;
+      parkCache = park;
+      weatherCache = weather;
+      defenseCache = defense;
+
       lastEnv = {
         parkRunFactor: park.runFactor,
         weatherRunFactor: weather.factor,
@@ -278,7 +320,7 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
 
       // Full-lineup display stats (xOBP/xSLG) for both teams' starters and
       // the opposite-half no-run probability used to derive full-inning. We
-      // compute these on the same recompute trigger so they share the same
+      // compute these on the structural trigger so they share the same
       // park/weather/defense snapshot, and reuse the (12h Redis) splits cache
       // for any batter who's already been loaded today.
       const awayStarterIds = starterIdsOf(lastLineups?.away ?? null);
@@ -309,10 +351,10 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
             weather: weather.components,
             // Pass the live alignment only when away is currently batting —
             // otherwise the catcher/fielder ids reflect the wrong defense.
-            oaaTable: half === "Top" ? defense.oaaTable : undefined,
-            framingTable: half === "Top" ? defense.framingTable : undefined,
-            catcherId: half === "Top" ? alignment.catcherId : null,
-            fielderIds: half === "Top" ? alignment.fielderIds : [],
+            oaaTable: upcoming.half === "Top" ? defense.oaaTable : undefined,
+            framingTable: upcoming.half === "Top" ? defense.framingTable : undefined,
+            catcherId: upcoming.half === "Top" ? alignment.catcherId : null,
+            fielderIds: upcoming.half === "Top" ? alignment.fielderIds : [],
           })
         : {};
       const homeStats: Record<string, LineupBatterStat> = homeBundle
@@ -322,18 +364,21 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
             batters: homeBundle.batters,
             park: park.components,
             weather: weather.components,
-            oaaTable: half === "Bottom" ? defense.oaaTable : undefined,
-            framingTable: half === "Bottom" ? defense.framingTable : undefined,
-            catcherId: half === "Bottom" ? alignment.catcherId : null,
-            fielderIds: half === "Bottom" ? alignment.fielderIds : [],
+            oaaTable: upcoming.half === "Bottom" ? defense.oaaTable : undefined,
+            framingTable: upcoming.half === "Bottom" ? defense.framingTable : undefined,
+            catcherId: upcoming.half === "Bottom" ? alignment.catcherId : null,
+            fielderIds: upcoming.half === "Bottom" ? alignment.fielderIds : [],
           })
         : {};
       lastLineupStats = { away: awayStats, home: homeStats };
 
-      // Full-inning composition. When in Top, full = (rest of top) × (clean
-      // bottom); home batters from {0 outs, empty bases} vs away pitcher.
-      // When in Bottom, top is over → full equals the half value.
-      if (half === "Top" && homeBundle) {
+      // Pre-compute the clean opposite-half P(no run). Only meaningful when
+      // upcoming.half === "Top" (= we're in or starting a top half, so the
+      // opposite half is the bottom we'll need to compose into the full
+      // inning). At end of bottom this also fires for the next inning's top
+      // half via upcoming.inning advancing — homeBundle remains the right
+      // bundle (home batters vs away pitcher) regardless of inning number.
+      if (upcoming.half === "Top" && homeBundle) {
         const oppHalf = await computeNrXiStep({
           gamePk: input.gamePk,
           pitcher: homeBundle.pitcher,
@@ -348,14 +393,63 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
           catcherId: null,
           fielderIds: [],
         });
-        const pNoFull = lastNrXi.pNoHitEvent * oppHalf.pNoHitEvent;
+        oppHalfCleanCache = {
+          pHitEvent: oppHalf.pHitEvent,
+          pNoHitEvent: oppHalf.pNoHitEvent,
+        };
+      } else {
+        oppHalfCleanCache = null;
+      }
+
+      lastStructuralKey = structuralKey;
+    }
+
+    // ---- Phase 2: play-state recompute (per PA outcome) ----
+    // Fires every tick when the play-state key advances OR after a structural
+    // reload. Reuses cached splits/park/weather/defense and only re-runs the
+    // Markov chain against the current outs/bases. This is what makes
+    // pNoHitEvent refresh on every plate-appearance outcome (out, walk, hit,
+    // HBP, error, FC, SB, HR, etc.).
+    if (
+      shouldRecomputePlay &&
+      upcoming &&
+      splitsCache &&
+      parkCache &&
+      weatherCache &&
+      defenseCache
+    ) {
+      const startState = readMarkovStartState(tick.feed);
+      const paInGameForPitcher = readPaInGameForPitcher(tick.feed, upcoming.pitcherId!);
+      lastNrXi = await computeNrXiStep({
+        gamePk: input.gamePk,
+        pitcher: splitsCache.pitcher,
+        batters: splitsCache.batters,
+        park: parkCache.components,
+        weather: weatherCache.components,
+        startState,
+        paInGameForPitcher,
+        oaaTable: defenseCache.oaaTable,
+        framingTable: defenseCache.framingTable,
+        catcherId: alignment.catcherId,
+        fielderIds: alignment.fielderIds,
+      });
+
+      // Full-inning composition keyed off upcoming.half (NOT raw `half`).
+      // Mid-top: full = (rest of top) × (clean bottom). End of top:
+      // upcoming.half flips to "Bottom" → full = lastNrXi (= bottom clean).
+      // Mid-bottom: full = (rest of bottom). End of bottom: upcoming.half
+      // flips to "Top" of next inning → full = lastNrXi × oppHalfClean of the
+      // next full inning. Reverting to raw `half` reintroduces a squared bug
+      // at end-of-top and a missing-bottom bug at end-of-bottom.
+      if (upcoming.half === "Top" && oppHalfCleanCache) {
+        const pNoFull = lastNrXi.pNoHitEvent * oppHalfCleanCache.pNoHitEvent;
         const pHitFull = 1 - pNoFull;
         lastFullInning = {
           pHit: pHitFull,
           pNo: pNoFull,
           breakEven: roundOdds(americanBreakEven(pNoFull)),
         };
-      } else if (half === "Bottom") {
+      } else if (upcoming.half === "Bottom") {
         lastFullInning = {
           pHit: lastNrXi.pHitEvent,
           pNo: lastNrXi.pNoHitEvent,
@@ -365,10 +459,7 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
         lastFullInning = null;
       }
 
-      lastInningKey = inningKey;
-      lastLineupHash = lh;
-      lastDefenseKey = dk;
-      lastOppPitcherHash = op;
+      lastPlayStateKey = playStateKey;
     }
 
     const nrXi = lastNrXi;
