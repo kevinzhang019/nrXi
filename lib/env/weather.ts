@@ -98,8 +98,8 @@ function parseBrick(
   const tempM = text.match(/(-?\d{1,3}(?:\.\d+)?)\s*°?\s*f\b/);
   const windM = text.match(/wind:\s*(\d{1,2}(?:\.\d+)?)\s*mph/) || text.match(/(\d{1,2}(?:\.\d+)?)\s*mph/);
   const precipM =
-    text.match(/p\.?o\.?p\.?[^0-9]*(\d{1,3})\s*%/) ||
-    text.match(/precip[a-z]*[^0-9]*(\d{1,3})\s*%/);
+    text.match(/p\.?o\.?p\.?[^0-9]*(\d{1,3}(?:\.\d+)?)\s*%/) ||
+    text.match(/precip[a-z]*[^0-9]*(\d{1,3}(?:\.\d+)?)\s*%/);
   const humM = text.match(/humidity[^0-9]*(\d{1,3}(?:\.\d+)?)\s*%/);
   const presM = text.match(/(\d{2}\.\d{1,2})\s*(?:in\s*hg|inhg|inches)/);
 
@@ -117,7 +117,7 @@ function parseBrick(
     tempF: tempM ? Math.round(parseFloat(tempM[1])) : null,
     windMph,
     windDir,
-    precipPct: precipM ? parseInt(precipM[1], 10) : null,
+    precipPct: precipM ? Math.round(parseFloat(precipM[1])) : null,
     humidityPct: humM ? Math.round(parseFloat(humM[1])) : null,
     pressureInHg: presM ? parseFloat(presM[1]) : null,
     isDome,
