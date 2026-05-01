@@ -311,6 +311,9 @@ curl -s -X POST -H "Content-Type: application/json" \
 - The team→venueId map in `lib/parks/team-to-venue.ts` — Athletics map to Sutter Health Park (2529) but the polygon is Oakland Coliseum geometry; Rays map to Tropicana (12) regardless of any temporary relocation. These are deliberate compromises so the outline always renders. Don't drop entries — that just hides the silhouette.
 - The `lh !== lastEnrichedHash` enrichment trigger in `workflows/game-watcher.ts` and the hoisted `lastLineups`/`lastEnrichedHash` workflow-scope vars (bug #7) — independent of `shouldRecompute` so Pre-game lineups hydrate the moment they post
 - `LineupEntry.bats: HandCode | null` (`lib/mlb/extract.ts`) — the explicit nullability is the type-system guard against the bug-#7 default-to-R lie
+- **Pitch count is read fresh every tick** in the state-construction block of `workflows/game-watcher.ts` via `readPitcherPitchCount`, NOT inside the structural-reload branch. Pitch count changes on every pitch; structural reload only fires on PA boundaries. Hoisting it into a `lastPitchCount` workflow var would freeze the value mid-PA.
+- **`game.awayPitcher` / `game.homePitcher` carry the LAST pitcher used by each team** (last entry of `boxscore.teams[side].pitchers[]`, sourced via `readBothPitchers`). When the team is fielding, that's the active mound pitcher; when sitting, it's whoever last pitched today. **No bullpen projection.** Split-mode renders both (currently-pitching on top, the other with `muted` styling) — removing this would silently make the muted pitcher disappear during the team's at-bat. Hoisted as `lastAwayPitcher` / `lastHomePitcher` in workflow scope per the bug #5/#7 pattern.
+- **Single-pane `selectedSide` state lives in `GameCard`, not `LineupSinglePane`** (`components/game-card.tsx`). The pitcher row above the pane AND the lineup pane both derive from it (single mode shows the OPPOSING pitcher to `selectedSide`). Moving it back to the child would force the pitcher row to read its sibling's state via prop drilling backwards.
 
 ## Dashboard sectioning + motion (added in this PR)
 
@@ -338,6 +341,20 @@ The displayed numbers come from `statsById: Map<id, { pReach, xSlg }>` built in 
 Display formatting uses `formatBaseballRate(n)`: 3 decimal places, leading `0` stripped only when present (so xOBP renders `.345` and xSLG renders `.412` or `1.234` if it ever exceeds 1).
 
 **Player-name links.** The batter name (starter and sub `↳` rows) is an `<a target="_blank" rel="noopener noreferrer" href="https://www.mlb.com/player/{id}">` — clicking opens the canonical MLB.com player page in a new tab (mlb.com resolves the bare id to the slugged URL server-side, so we don't need a name slug). The pitcher row at the top of `components/game-card.tsx` is wrapped the same way around `game.pitcher.name`. The accent classes (`text-[var(--color-accent)] font-medium`) and the sub `↳` glyph live INSIDE the anchor so the visible name string is the click target and the at-bat/on-deck focus signal still applies. Hover affordance is `hover:underline underline-offset-2` only — no color change on hover, since the accent color is reserved for the at-bat / next-half-leadoff signal.
+
+## Pitcher row contract
+
+`<PitcherRow>` (`components/pitcher-row.tsx`) renders one pitcher's row above the lineup section. Layout: name link · `(LHP|RHP)` · `ERA x.xx` · `WHIP x.xx` · `P NN`. Spacing is `gap-x-2` (tightened from `gap-x-3`) so a long name + 3 stats fits without wrapping on a normal-width card; the row still uses `flex-wrap` for genuinely-long edge cases.
+
+The "P" stat is the pitcher's cumulative in-game pitch count, sourced from `boxscore.teams.{side}.players[ID{pitcherId}].stats.pitching.numberOfPitches` via `readPitcherPitchCount` in `workflows/game-watcher.ts`. It is read **fresh every tick** in the state-construction block (NOT cached in workflow scope) so the count updates intra-PA — pitch count changes on every pitch, far more often than the structural reload fires.
+
+**Per view-mode rendering** in `components/game-card.tsx`:
+- **`viewMode === "single"`**: ONE row, showing the OPPOSING pitcher to the selected lineup side (`selectedSide === "away" ? game.homePitcher : game.awayPitcher`). Half-inning flip auto-snaps both the lineup pane AND this pitcher row, since `selectedSide` is lifted to `GameCard` and shared.
+- **`viewMode === "split"`**: TWO rows stacked. The currently-pitching team's pitcher is on top in normal color; the other team's last pitcher is below with `muted` styling (`text-[var(--color-muted)]` on the name + stat values). Determined by `game.half`: `Top → home pitches`, `Bottom → away pitches`. Pre-game / Final default to home on top.
+
+The "other team's pitcher" displayed in split mode is the last pitcher who pitched for that team (`boxscore.teams[side].pitchers[]` last entry — `bothPitchers.{away,home}PitcherId` in the watcher). **No bullpen projection.** When the team is fielding it equals the active mound pitcher; when sitting it's whoever last pitched. This mirrors how `game.pitcher` already behaves for the prob pipeline.
+
+`PitcherInfo.pitchCount` may be `null` when the boxscore hasn't populated it yet (very early pre-game) — the row hides the P stat in that case rather than rendering "P 0" as if zero pitches were thrown.
 
 ## Park outline (CAD-blueprint glyph)
 

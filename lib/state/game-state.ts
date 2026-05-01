@@ -11,6 +11,15 @@ export type PerBatter = {
 
 export type LineupBatterStat = { pReach: number; xSlg: number };
 
+export type PitcherInfo = {
+  id: number;
+  name: string;
+  throws: "L" | "R";
+  era: number | null;
+  whip: number | null;
+  pitchCount: number | null;
+};
+
 export type GameState = {
   gamePk: number;
   status: GameStatus;
@@ -22,13 +31,14 @@ export type GameState = {
   away: { id: number; name: string; runs: number };
   home: { id: number; name: string; runs: number };
   venue: { id: number; name: string } | null;
-  pitcher: {
-    id: number;
-    name: string;
-    throws: "L" | "R";
-    era: number | null;
-    whip: number | null;
-  } | null;
+  pitcher: PitcherInfo | null;
+  // Both teams' most recent pitcher (last entry of boxscore.teams[side].pitchers[]).
+  // While the team is fielding this equals the active mound pitcher; while sitting
+  // it's whoever last pitched. NOT a bullpen projection. The "currently pitching"
+  // one is whichever side opposes the current batting team — `pitcher` above
+  // mirrors that for the probability pipeline.
+  awayPitcher: PitcherInfo | null;
+  homePitcher: PitcherInfo | null;
   upcomingBatters: PerBatter[];
   pHitEvent: number | null;
   pNoHitEvent: number | null;

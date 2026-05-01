@@ -17,6 +17,18 @@ import { americanBreakEven, roundOdds } from "@/lib/prob/odds";
 import type { LiveFeed } from "@/lib/mlb/types";
 import type { Bases, GameState as MarkovState } from "@/lib/prob/markov";
 
+// Read this pitcher's cumulative in-game pitch count from the boxscore. Refreshed
+// every tick (NOT cached in workflow scope) because pitch count changes on every
+// pitch — far more often than the structural reload fires.
+function readPitcherPitchCount(feed: LiveFeed, pitcherId: number): number | null {
+  const teams = feed.liveData.boxscore?.teams;
+  if (!teams) return null;
+  const key = `ID${pitcherId}`;
+  const p = teams.home.players?.[key] ?? teams.away.players?.[key];
+  const n = p?.stats?.pitching?.numberOfPitches;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
 // Read live (outs, bases) from the MLB feed. Bases use the canonical 3-bit
 // encoding shared with the Markov chain (bit0=1st, bit1=2nd, bit2=3rd).
 //
@@ -175,6 +187,12 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
   let lastPitcherThrows: "L" | "R" = "R";
   let lastPitcherEra: number | null = null;
   let lastPitcherWhip: number | null = null;
+  // Both teams' most recent pitchers (id/name/throws/era/whip — pitch count is
+  // refreshed every tick from the boxscore, not hoisted). Hoisted to workflow
+  // scope per the bug #5/#7 pattern so they survive non-recompute ticks.
+  type PitcherCore = { id: number; name: string; throws: "L" | "R"; era: number | null; whip: number | null };
+  let lastAwayPitcher: PitcherCore | null = null;
+  let lastHomePitcher: PitcherCore | null = null;
   // Full-inning probability — composed of (rest-of-current-half) × (clean
   // opposite half). Null when half=Top and the opposing pitcher is unknown,
   // so the UI shows "—" instead of silently falling through.
@@ -372,6 +390,31 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
         : {};
       lastLineupStats = { away: awayStats, home: homeStats };
 
+      // Both teams' pitcher cores. awayBundle was loaded with HOME's pitcherId
+      // (it pitches to away batters), so awayBundle.pitcher describes HOME's
+      // pitcher; homeBundle.pitcher mirrors that for AWAY. ERA/WHIP come from
+      // the boxscore, mirroring the existing readPitcherSeasonStats path.
+      if (awayBundle && bothPitchers.homePitcherId !== null) {
+        const s = readPitcherSeasonStats(tick.feed, bothPitchers.homePitcherId);
+        lastHomePitcher = {
+          id: awayBundle.pitcher.id,
+          name: awayBundle.pitcher.fullName,
+          throws: awayBundle.pitcher.throws,
+          era: s.era,
+          whip: s.whip,
+        };
+      }
+      if (homeBundle && bothPitchers.awayPitcherId !== null) {
+        const s = readPitcherSeasonStats(tick.feed, bothPitchers.awayPitcherId);
+        lastAwayPitcher = {
+          id: homeBundle.pitcher.id,
+          name: homeBundle.pitcher.fullName,
+          throws: homeBundle.pitcher.throws,
+          era: s.era,
+          whip: s.whip,
+        };
+      }
+
       // Pre-compute the clean opposite-half P(no run). Only meaningful when
       // upcoming.half === "Top" (= we're in or starting a top half, so the
       // opposite half is the bottom we'll need to compose into the full
@@ -496,8 +539,15 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
               throws: lastPitcherThrows,
               era: lastPitcherEra,
               whip: lastPitcherWhip,
+              pitchCount: readPitcherPitchCount(tick.feed, lastPitcherId),
             }
           : null,
+      awayPitcher: lastAwayPitcher
+        ? { ...lastAwayPitcher, pitchCount: readPitcherPitchCount(tick.feed, lastAwayPitcher.id) }
+        : null,
+      homePitcher: lastHomePitcher
+        ? { ...lastHomePitcher, pitchCount: readPitcherPitchCount(tick.feed, lastHomePitcher.id) }
+        : null,
       upcomingBatters: nrXi?.perBatter ?? [],
       pHitEvent: nrXi?.pHitEvent ?? null,
       pNoHitEvent: nrXi?.pNoHitEvent ?? null,

@@ -23,6 +23,8 @@ export async function seedSnapshotStep(games: ScheduledGame[]): Promise<{ seeded
       home: { id: g.homeTeam.id, name: g.homeTeam.name, runs: 0 },
       venue: g.venueId != null ? { id: g.venueId, name: "" } : null,
       pitcher: null,
+      awayPitcher: null,
+      homePitcher: null,
       upcomingBatters: [],
       pHitEvent: null,
       pNoHitEvent: null,

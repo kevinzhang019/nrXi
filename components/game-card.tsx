@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { GameState } from "@/lib/state/game-state";
 import { cn } from "@/lib/utils";
 import { ProbabilityPill } from "@/components/probability-pill";
@@ -9,7 +9,10 @@ import { LineScore } from "@/components/line-score";
 import { LineupColumn } from "@/components/lineup-column";
 import { LineupSinglePane } from "@/components/lineup-single-pane";
 import { ParkSection } from "@/components/park-section";
+import { PitcherRow } from "@/components/pitcher-row";
 import { useSettings } from "@/lib/hooks/use-settings";
+
+type Side = "away" | "home";
 
 function teamShort(name: string): string {
   const parts = name.split(" ");
@@ -22,6 +25,20 @@ function teamShort(name: string): string {
 export function GameCard({ game }: { game: GameState }) {
   const decision = game.isDecisionMoment;
   const { settings } = useSettings();
+
+  // Single-pane lineup selection. Lifted here so the pitcher row above the
+  // pane can render the OPPOSING pitcher to the selected lineup. Auto-snaps
+  // to the new batting team on half-inning flips; clicks set an ad-hoc peek
+  // that resets on the next flip.
+  const [manualOverride, setManualOverride] = useState<Side | null>(null);
+  const [lastBattingSide, setLastBattingSide] = useState<Side | null>(game.battingTeam);
+  useEffect(() => {
+    if (game.battingTeam !== lastBattingSide) {
+      setManualOverride(null);
+      setLastBattingSide(game.battingTeam);
+    }
+  }, [game.battingTeam, lastBattingSide]);
+  const selectedSide: Side = manualOverride ?? game.battingTeam ?? "away";
 
   // Map upcoming-batter xOBP (pReach) and xSLG onto their player ids so the
   // lineup rows can show stats inline for batters in the upcoming sequence.
@@ -98,68 +115,59 @@ export function GameCard({ game }: { game: GameState }) {
       )}
 
       <section className="space-y-3 px-4 py-4">
-        {game.pitcher && (
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-              <span className="text-[13px] text-[var(--color-fg)]">
-                <a
-                  href={`https://www.mlb.com/player/${game.pitcher.id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:underline underline-offset-2"
-                >
-                  {game.pitcher.name}
-                </a>{" "}
-                <span className="text-[11px] text-[var(--color-muted)]">
-                  ({game.pitcher.throws}HP)
-                </span>
-              </span>
-              {game.pitcher.era !== null && Number.isFinite(game.pitcher.era) && (
-                <span className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
-                  ERA{" "}
-                  <span className="font-mono tabular-nums text-[var(--color-fg)]">
-                    {game.pitcher.era.toFixed(2)}
-                  </span>
-                </span>
-              )}
-              {game.pitcher.whip !== null && Number.isFinite(game.pitcher.whip) && (
-                <span className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
-                  WHIP{" "}
-                  <span className="font-mono tabular-nums text-[var(--color-fg)]">
-                    {game.pitcher.whip.toFixed(2)}
-                  </span>
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-
         {settings.viewMode === "single" ? (
-          <LineupSinglePane
-            game={game}
-            upcomingStatsById={statsById}
-            awayHighlightId={awayHighlightId}
-            awayHighlightKind={awayMarker}
-            homeHighlightId={homeHighlightId}
-            homeHighlightKind={homeMarker}
-          />
+          <>
+            {(() => {
+              // Pitcher pitching to the selected lineup (the OPPOSING side).
+              const opposing = selectedSide === "away" ? game.homePitcher : game.awayPitcher;
+              const fallback = opposing ?? game.pitcher;
+              return fallback ? <PitcherRow pitcher={fallback} /> : null;
+            })()}
+            <LineupSinglePane
+              game={game}
+              upcomingStatsById={statsById}
+              awayHighlightId={awayHighlightId}
+              awayHighlightKind={awayMarker}
+              homeHighlightId={homeHighlightId}
+              homeHighlightKind={homeMarker}
+              selectedSide={selectedSide}
+              onSelectSide={setManualOverride}
+            />
+          </>
         ) : (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <LineupColumn
-              label={teamShort(game.away.name)}
-              lineup={game.lineups?.away ?? null}
-              highlightId={awayHighlightId}
-              highlightKind={awayMarker}
-              statsById={statsById}
-            />
-            <LineupColumn
-              label={teamShort(game.home.name)}
-              lineup={game.lineups?.home ?? null}
-              highlightId={homeHighlightId}
-              highlightKind={homeMarker}
-              statsById={statsById}
-            />
-          </div>
+          <>
+            {(() => {
+              // Currently-pitching team is the one fielding now: Top → home pitches,
+              // Bottom → away pitches. Pre-game / Final default to home on top.
+              const fieldingSide: Side =
+                game.half === "Top" ? "home" : game.half === "Bottom" ? "away" : "home";
+              const top = fieldingSide === "away" ? game.awayPitcher : game.homePitcher;
+              const bottom = fieldingSide === "away" ? game.homePitcher : game.awayPitcher;
+              if (!top && !bottom) return game.pitcher ? <PitcherRow pitcher={game.pitcher} /> : null;
+              return (
+                <div className="space-y-1">
+                  {top && <PitcherRow pitcher={top} />}
+                  {bottom && <PitcherRow pitcher={bottom} muted />}
+                </div>
+              );
+            })()}
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <LineupColumn
+                label={teamShort(game.away.name)}
+                lineup={game.lineups?.away ?? null}
+                highlightId={awayHighlightId}
+                highlightKind={awayMarker}
+                statsById={statsById}
+              />
+              <LineupColumn
+                label={teamShort(game.home.name)}
+                lineup={game.lineups?.home ?? null}
+                highlightId={homeHighlightId}
+                highlightKind={homeMarker}
+                statsById={statsById}
+              />
+            </div>
+          </>
         )}
 
         <ParkSection

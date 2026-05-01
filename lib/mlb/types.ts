@@ -87,7 +87,7 @@ export type BoxscorePlayer = {
   battingOrder?: string;
   battingOrderSlot?: number;
   batSide?: { code?: HandCode };
-  stats?: { pitching?: { battersFaced?: number } };
+  stats?: { pitching?: { battersFaced?: number; numberOfPitches?: number } };
   // MLB returns season ERA/WHIP as strings (e.g. "3.42", "1.18").
   seasonStats?: {
     pitching?: { era?: string; whip?: string };

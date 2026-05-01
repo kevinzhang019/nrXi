@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import type { GameState } from "@/lib/state/game-state";
 import { LineupColumn, type BatterStats } from "@/components/lineup-column";
 import { cn } from "@/lib/utils";
@@ -22,6 +22,8 @@ export function LineupSinglePane({
   awayHighlightKind,
   homeHighlightId,
   homeHighlightKind,
+  selectedSide,
+  onSelectSide,
 }: {
   game: GameState;
   // Stats for the upcoming half-inning (already on the published state). Used
@@ -32,27 +34,11 @@ export function LineupSinglePane({
   awayHighlightKind: "current" | "next" | null;
   homeHighlightId: number | null;
   homeHighlightKind: "current" | "next" | null;
+  // Lifted to GameCard so the pitcher rendered above the pane can react to the
+  // same selection (single-mode shows the OPPOSING pitcher to selectedSide).
+  selectedSide: Side;
+  onSelectSide: (side: Side) => void;
 }) {
-  // Track the manually-selected side and the most recently observed batting
-  // side. When game.battingTeam changes (half-inning flip, including null →
-  // away on first pitch), we clear any manual override and re-snap to the new
-  // at-bat team. This matches the spec: "automatically switch panes whenever
-  // half inning is triggered."
-  const [manualOverride, setManualOverride] = useState<Side | null>(null);
-  const [lastBattingSide, setLastBattingSide] = useState<Side | null>(
-    game.battingTeam,
-  );
-
-  useEffect(() => {
-    if (game.battingTeam !== lastBattingSide) {
-      setManualOverride(null);
-      setLastBattingSide(game.battingTeam);
-    }
-  }, [game.battingTeam, lastBattingSide]);
-
-  const selectedSide: Side =
-    manualOverride ?? game.battingTeam ?? "away";
-
   const statsById = useMemo(() => {
     const m = new Map<number, BatterStats>();
     const fromState = game.lineupStats?.[selectedSide];
@@ -89,7 +75,7 @@ export function LineupSinglePane({
             <button
               key={side}
               type="button"
-              onClick={() => setManualOverride(side)}
+              onClick={() => onSelectSide(side)}
               className={cn(
                 "transition-colors",
                 isSelected
