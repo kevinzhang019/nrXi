@@ -1,6 +1,8 @@
 import { Suspense } from "react";
 import { connection } from "next/server";
 import { GameBoard } from "@/components/game-board";
+import { SettingsButton } from "@/components/settings-button";
+import { SettingsProvider } from "@/lib/hooks/use-settings";
 import { getSnapshot } from "@/lib/pubsub/publisher";
 import type { GameState } from "@/lib/state/game-state";
 
@@ -20,19 +22,22 @@ async function GameBoardLoader() {
 
 export default function Page() {
   return (
-    <main className="mx-auto max-w-[1400px] px-6 py-8">
-      <header className="mb-8 flex items-baseline justify-between">
-        <div>
-          <h1 className="text-2xl font-medium tracking-tight">nrXi</h1>
-          <p className="mt-1 text-sm text-[var(--color-muted)]">
-            per-inning scoring probabilities • live MLB
-          </p>
-        </div>
-      </header>
-      <Suspense fallback={<BoardSkeleton />}>
-        <GameBoardLoader />
-      </Suspense>
-    </main>
+    <SettingsProvider>
+      <main className="mx-auto max-w-[1400px] px-6 py-8">
+        <header className="mb-8 flex items-start justify-between">
+          <div>
+            <h1 className="text-2xl font-medium tracking-tight">nrXi</h1>
+            <p className="mt-1 text-sm text-[var(--color-muted)]">
+              per-inning scoring probabilities • live MLB
+            </p>
+          </div>
+          <SettingsButton />
+        </header>
+        <Suspense fallback={<BoardSkeleton />}>
+          <GameBoardLoader />
+        </Suspense>
+      </main>
+    </SettingsProvider>
   );
 }
 

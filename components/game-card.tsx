@@ -7,7 +7,9 @@ import { ProbabilityPill } from "@/components/probability-pill";
 import { InningState } from "@/components/inning-state";
 import { LineScore } from "@/components/line-score";
 import { LineupColumn } from "@/components/lineup-column";
+import { LineupSinglePane } from "@/components/lineup-single-pane";
 import { ParkSection } from "@/components/park-section";
+import { useSettings } from "@/lib/hooks/use-settings";
 
 function teamShort(name: string): string {
   const parts = name.split(" ");
@@ -19,6 +21,7 @@ function teamShort(name: string): string {
 
 export function GameCard({ game }: { game: GameState }) {
   const decision = game.isDecisionMoment;
+  const { settings } = useSettings();
 
   // Map upcoming-batter xOBP (pReach) and xSLG onto their player ids so the
   // lineup rows can show stats inline for batters in the upcoming sequence.
@@ -124,22 +127,33 @@ export function GameCard({ game }: { game: GameState }) {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <LineupColumn
-            label={teamShort(game.away.name)}
-            lineup={game.lineups?.away ?? null}
-            highlightId={awayHighlightId}
-            highlightKind={awayMarker}
-            statsById={statsById}
+        {settings.viewMode === "single" ? (
+          <LineupSinglePane
+            game={game}
+            upcomingStatsById={statsById}
+            awayHighlightId={awayHighlightId}
+            awayHighlightKind={awayMarker}
+            homeHighlightId={homeHighlightId}
+            homeHighlightKind={homeMarker}
           />
-          <LineupColumn
-            label={teamShort(game.home.name)}
-            lineup={game.lineups?.home ?? null}
-            highlightId={homeHighlightId}
-            highlightKind={homeMarker}
-            statsById={statsById}
-          />
-        </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <LineupColumn
+              label={teamShort(game.away.name)}
+              lineup={game.lineups?.away ?? null}
+              highlightId={awayHighlightId}
+              highlightKind={awayMarker}
+              statsById={statsById}
+            />
+            <LineupColumn
+              label={teamShort(game.home.name)}
+              lineup={game.lineups?.home ?? null}
+              highlightId={homeHighlightId}
+              highlightKind={homeMarker}
+              statsById={statsById}
+            />
+          </div>
+        )}
 
         <ParkSection
           venueId={game.venue?.id ?? null}
@@ -153,8 +167,16 @@ export function GameCard({ game }: { game: GameState }) {
 
       <footer className="border-t border-[var(--color-border)] bg-[var(--color-subtle)]/40 px-4 py-3">
         <ProbabilityPill
-          pNoHitEvent={game.pNoHitEvent}
-          breakEvenAmerican={game.breakEvenAmerican}
+          pNoHitEvent={
+            settings.predictMode === "full"
+              ? game.pNoHitEventFullInning
+              : game.pNoHitEvent
+          }
+          breakEvenAmerican={
+            settings.predictMode === "full"
+              ? game.breakEvenAmericanFullInning
+              : game.breakEvenAmerican
+          }
         />
       </footer>
     </article>

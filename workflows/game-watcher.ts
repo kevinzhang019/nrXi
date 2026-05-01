@@ -6,12 +6,14 @@ import { loadParkFactorStep } from "./steps/load-park-factor";
 import { loadWeatherStep } from "./steps/load-weather";
 import { loadDefenseStep } from "./steps/load-defense";
 import { computeNrXiStep } from "./steps/compute-nrXi";
+import { computeLineupStatsStep } from "./steps/compute-lineup-stats";
 import { publishUpdateStep } from "./steps/publish-update";
 import { enrichLineupHandsStep } from "./steps/enrich-lineup-hands";
 import { getUpcomingForCurrentInning, lineupHash } from "@/lib/mlb/lineup";
 import { extractLineups, extractLinescore, extractBatterFocus } from "@/lib/mlb/extract";
-import { isDecisionMoment, type GameState } from "@/lib/state/game-state";
+import { isDecisionMoment, type GameState, type LineupBatterStat } from "@/lib/state/game-state";
 import { classifyStatus } from "@/lib/mlb/types";
+import { americanBreakEven, roundOdds } from "@/lib/prob/odds";
 import type { LiveFeed } from "@/lib/mlb/types";
 import type { Bases, GameState as MarkovState } from "@/lib/prob/markov";
 
@@ -82,6 +84,32 @@ function defenseAlignmentKey(catcherId: number | null, fielderIds: number[]): st
   return `${catcherId ?? "_"}-${fielderIds.join(",")}`;
 }
 
+// The "current pitcher" for each side. While their team is fielding, this is
+// the pitcher actually on the mound (last entry of pitchers[]). Otherwise it's
+// the most-recently-listed pitcher (starter pre-game; latest reliever if they
+// already pitched). Returns null when the boxscore array is empty (very early
+// pre-game with no probable starter posted yet).
+function readBothPitchers(feed: LiveFeed): {
+  awayPitcherId: number | null;
+  homePitcherId: number | null;
+} {
+  const teams = feed.liveData.boxscore?.teams;
+  const ap = teams?.away.pitchers ?? [];
+  const hp = teams?.home.pitchers ?? [];
+  return {
+    awayPitcherId: ap[ap.length - 1] ?? null,
+    homePitcherId: hp[hp.length - 1] ?? null,
+  };
+}
+
+// Pull the 9 starter ids out of an enriched lineup. Returns null when the
+// lineup hasn't posted yet (length < 9). Only starters; in-game subs are
+// already handled by the at-bat-side compute path.
+function starterIdsOf(lineup: { starter: { id: number } }[] | null): number[] | null {
+  if (!lineup || lineup.length < 9) return null;
+  return lineup.slice(0, 9).map((s) => s.starter.id);
+}
+
 export type WatcherInput = {
   gamePk: number;
   ownerId: string;
@@ -124,6 +152,16 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
   let lastPitcherThrows: "L" | "R" = "R";
   let lastPitcherEra: number | null = null;
   let lastPitcherWhip: number | null = null;
+  // Full-inning probability — composed of (rest-of-current-half) × (clean
+  // opposite half). Null when half=Top and the opposing pitcher is unknown,
+  // so the UI shows "—" instead of silently falling through.
+  let lastFullInning: { pHit: number; pNo: number; breakEven: number } | null = null;
+  // Display-only xOBP/xSLG for both teams' starters keyed by player id. Drives
+  // the "one team at a time" view that surfaces stats for all 9 batters of
+  // either team. Hoisted to workflow scope (bug #5/#7 pattern) so it persists
+  // across non-recompute ticks.
+  let lastLineupStats: GameState["lineupStats"] = null;
+  let lastOppPitcherHash = "";
 
   for (let loop = 0; loop < MAX_LOOPS; loop++) {
     const tick = await fetchLiveDiffStep({
@@ -153,12 +191,17 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
     const alignment = readDefenseAlignment(tick.feed);
     const dk = defenseAlignmentKey(alignment.catcherId, alignment.fielderIds);
     const upcoming = getUpcomingForCurrentInning(tick.feed);
+    const bothPitchers = readBothPitchers(tick.feed);
+    const op = `${bothPitchers.awayPitcherId ?? "_"}-${bothPitchers.homePitcherId ?? "_"}`;
 
     const shouldRecompute =
       status === "Live" &&
       upcoming !== null &&
       upcoming.pitcherId !== null &&
-      (inningKey !== lastInningKey || lh !== lastLineupHash || dk !== lastDefenseKey);
+      (inningKey !== lastInningKey ||
+        lh !== lastLineupHash ||
+        dk !== lastDefenseKey ||
+        op !== lastOppPitcherHash);
 
     console.log(
       "[watcher] tick",
@@ -172,6 +215,20 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
         shouldRecompute,
       }),
     );
+
+    // Hydrate lineup batter handedness from /people/{id} when the boxscore
+    // battingOrder changes. Done BEFORE the recompute block so lastLineups is
+    // available for starter id lookup. Independent of shouldRecompute so
+    // Pre-game lineups (status !== "Live") still get hydrated as soon as they
+    // post.
+    if (lh !== lastEnrichedHash) {
+      const rawLineups = extractLineups(tick.feed);
+      lastLineups = await enrichLineupHandsStep({
+        gamePk: input.gamePk,
+        lineups: rawLineups,
+      });
+      lastEnrichedHash = lh;
+    }
 
     if (shouldRecompute && upcoming) {
       const [splits, park, weather, defense] = await Promise.all([
@@ -218,25 +275,104 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       const seasonStats = readPitcherSeasonStats(tick.feed, splits.pitcher.id);
       lastPitcherEra = seasonStats.era;
       lastPitcherWhip = seasonStats.whip;
+
+      // Full-lineup display stats (xOBP/xSLG) for both teams' starters and
+      // the opposite-half no-run probability used to derive full-inning. We
+      // compute these on the same recompute trigger so they share the same
+      // park/weather/defense snapshot, and reuse the (12h Redis) splits cache
+      // for any batter who's already been loaded today.
+      const awayStarterIds = starterIdsOf(lastLineups?.away ?? null);
+      const homeStarterIds = starterIdsOf(lastLineups?.home ?? null);
+      const [awayBundle, homeBundle] = await Promise.all([
+        bothPitchers.homePitcherId !== null && awayStarterIds
+          ? loadLineupSplitsStep({
+              gamePk: input.gamePk,
+              pitcherId: bothPitchers.homePitcherId,
+              batterIds: awayStarterIds,
+            })
+          : Promise.resolve(null),
+        bothPitchers.awayPitcherId !== null && homeStarterIds
+          ? loadLineupSplitsStep({
+              gamePk: input.gamePk,
+              pitcherId: bothPitchers.awayPitcherId,
+              batterIds: homeStarterIds,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      const awayStats: Record<string, LineupBatterStat> = awayBundle
+        ? await computeLineupStatsStep({
+            gamePk: input.gamePk,
+            pitcher: awayBundle.pitcher,
+            batters: awayBundle.batters,
+            park: park.components,
+            weather: weather.components,
+            // Pass the live alignment only when away is currently batting —
+            // otherwise the catcher/fielder ids reflect the wrong defense.
+            oaaTable: half === "Top" ? defense.oaaTable : undefined,
+            framingTable: half === "Top" ? defense.framingTable : undefined,
+            catcherId: half === "Top" ? alignment.catcherId : null,
+            fielderIds: half === "Top" ? alignment.fielderIds : [],
+          })
+        : {};
+      const homeStats: Record<string, LineupBatterStat> = homeBundle
+        ? await computeLineupStatsStep({
+            gamePk: input.gamePk,
+            pitcher: homeBundle.pitcher,
+            batters: homeBundle.batters,
+            park: park.components,
+            weather: weather.components,
+            oaaTable: half === "Bottom" ? defense.oaaTable : undefined,
+            framingTable: half === "Bottom" ? defense.framingTable : undefined,
+            catcherId: half === "Bottom" ? alignment.catcherId : null,
+            fielderIds: half === "Bottom" ? alignment.fielderIds : [],
+          })
+        : {};
+      lastLineupStats = { away: awayStats, home: homeStats };
+
+      // Full-inning composition. When in Top, full = (rest of top) × (clean
+      // bottom); home batters from {0 outs, empty bases} vs away pitcher.
+      // When in Bottom, top is over → full equals the half value.
+      if (half === "Top" && homeBundle) {
+        const oppHalf = await computeNrXiStep({
+          gamePk: input.gamePk,
+          pitcher: homeBundle.pitcher,
+          batters: homeBundle.batters,
+          park: park.components,
+          weather: weather.components,
+          startState: { outs: 0, bases: 0 },
+          paInGameForPitcher: 0,
+          oaaTable: defense.oaaTable,
+          framingTable: defense.framingTable,
+          // Opposite half's defense isn't on the field; degrade gracefully.
+          catcherId: null,
+          fielderIds: [],
+        });
+        const pNoFull = lastNrXi.pNoHitEvent * oppHalf.pNoHitEvent;
+        const pHitFull = 1 - pNoFull;
+        lastFullInning = {
+          pHit: pHitFull,
+          pNo: pNoFull,
+          breakEven: roundOdds(americanBreakEven(pNoFull)),
+        };
+      } else if (half === "Bottom") {
+        lastFullInning = {
+          pHit: lastNrXi.pHitEvent,
+          pNo: lastNrXi.pNoHitEvent,
+          breakEven: lastNrXi.breakEvenAmerican,
+        };
+      } else {
+        lastFullInning = null;
+      }
+
       lastInningKey = inningKey;
       lastLineupHash = lh;
       lastDefenseKey = dk;
+      lastOppPitcherHash = op;
     }
 
     const nrXi = lastNrXi;
     const env = lastEnv;
-
-    // Hydrate lineup batter handedness from /people/{id} when the boxscore
-    // battingOrder changes. Independent of shouldRecompute so Pre-game
-    // lineups (status !== "Live") still get hydrated as soon as they post.
-    if (lh !== lastEnrichedHash) {
-      const rawLineups = extractLineups(tick.feed);
-      lastLineups = await enrichLineupHandsStep({
-        gamePk: input.gamePk,
-        lineups: rawLineups,
-      });
-      lastEnrichedHash = lh;
-    }
 
     const decision = isDecisionMoment({ status, inning, half, outs, inningState });
 
@@ -275,8 +411,12 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       pHitEvent: nrXi?.pHitEvent ?? null,
       pNoHitEvent: nrXi?.pNoHitEvent ?? null,
       breakEvenAmerican: nrXi?.breakEvenAmerican ?? null,
+      pHitEventFullInning: lastFullInning?.pHit ?? null,
+      pNoHitEventFullInning: lastFullInning?.pNo ?? null,
+      breakEvenAmericanFullInning: lastFullInning?.breakEven ?? null,
       env,
       lineups: lastLineups ?? extractLineups(tick.feed),
+      lineupStats: lastLineupStats,
       linescore: extractLinescore(tick.feed),
       ...extractBatterFocus(tick.feed),
       updatedAt: new Date().toISOString(),

@@ -9,6 +9,8 @@ export type PerBatter = {
   xSlg: number;
 };
 
+export type LineupBatterStat = { pReach: number; xSlg: number };
+
 export type GameState = {
   gamePk: number;
   status: GameStatus;
@@ -31,8 +33,22 @@ export type GameState = {
   pHitEvent: number | null;
   pNoHitEvent: number | null;
   breakEvenAmerican: number | null;
+  // Full-inning probability: P(at least one run scores in BOTH halves of the
+  // current inning). When half==="Bottom", equals the half-inning value (top
+  // is over). Null when the opposing pitcher / opposing lineup can't be
+  // resolved yet — UI renders "—".
+  pHitEventFullInning: number | null;
+  pNoHitEventFullInning: number | null;
+  breakEvenAmericanFullInning: number | null;
   env: { parkRunFactor: number; weatherRunFactor: number; weather?: Record<string, unknown> } | null;
   lineups: { away: TeamLineup | null; home: TeamLineup | null } | null;
+  // Full-lineup display stats (xOBP/xSLG) for both teams' starters, keyed by
+  // player id. Drives the "one team at a time" view that shows stats for all
+  // 9 batters of either team, regardless of who's currently up.
+  lineupStats: {
+    away: Record<string, LineupBatterStat>;
+    home: Record<string, LineupBatterStat>;
+  } | null;
   linescore: Linescore | null;
   battingTeam: "home" | "away" | null;
   currentBatterId: number | null;

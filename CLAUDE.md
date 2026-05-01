@@ -201,6 +201,38 @@ All keys come from `lib/cache/keys.ts`. Source of truth — don't hardcode key s
 - **v2.1: catcher framing + fielder OAA** (`lib/env/{framing,defense}.ts`, `lib/prob/{framing,defense}.ts`). Framing acts on K and BB cells, OAA on the in-play block. EB shrinkage priors: `n0 = 2000` called pitches for framing, `n0 = 200` opportunities for OAA. Factor clamps: framing `[0.95, 1.05]`, defense `[0.90, 1.10]`. Both default to identity when scrape fails or live alignment is missing — pipeline degrades gracefully to v2.
 - **Robo-ump kill switch:** `NRXI_DISABLE_FRAMING=1` zeroes the framing effect. Flip when MLB's ABS challenge system goes full-season; framing's value collapses overnight.
 - **Live defensive alignment** read from `liveData.linescore.defense.{catcher, first, second, third, shortstop, left, center, right}` ids each tick. The watcher's `defenseAlignmentKey` is part of the recompute trigger so defensive subs auto-invalidate the cache.
+- **User-facing settings defaults:** `predictMode: "full"`, `viewMode: "single"` (`lib/hooks/use-settings.tsx`). Persisted to `localStorage` under `nrxi:settings`. The defaults exist because (a) full-inning is the more "complete" prediction unit users want to bet against, and (b) one-team-at-a-time exposes xOBP/xSLG for all 9 batters, which is what the surface is for. Changing the defaults is a UX call — be deliberate.
+
+## Settings panel (predict mode + view mode)
+
+Top-right gear icon in `app/page.tsx` opens a popover with two segmented toggles. State lives in `SettingsProvider` (`lib/hooks/use-settings.tsx`) — React Context + `localStorage`. Provider is rendered ABOVE `<Suspense>`/`<GameBoard>` so every card and child component reads the same setting.
+
+**Predict mode (`half` | `full`):** picks which probability `<ProbabilityPill>` shows.
+- `half` → `pNoHitEvent` / `breakEvenAmerican` — P(no run scored in the current half-inning).
+- `full` → `pNoHitEventFullInning` / `breakEvenAmericanFullInning` — P(no run scored across BOTH halves of the current inning).
+
+The full-inning value is computed server-side in `workflows/game-watcher.ts`:
+- `half === "Top"`: `pNoFull = pNoTop_current × pNoBot_clean`. The bottom-half factor comes from a SECOND `computeNrXiStep` call with `startState: { outs: 0, bases: 0 }`, the home team's 9 starters, and the away team's current pitcher.
+- `half === "Bottom"`: `pNoFull = pNoBot_current` — the top is over, so half = full.
+- Opposing pitcher unknown (rare; pre-game with no probable starter, or a feed gap): `pNoHitEventFullInning = null` — the pill renders `—`. **No silent fall-through to half-inning.** That was an explicit product decision; preserve it.
+
+**View mode (`single` | `split`):** picks which lineup layout `<GameCard>` renders.
+- `single` (default) → `<LineupSinglePane>` shows ONE team at a time with team-name tabs above the column. Auto-snaps to `game.battingTeam` on every half-inning flip; manual click on the other tab is an ad-hoc peek that resets on the next flip. Pre-game default = away. Stats come from `game.lineupStats[selectedSide]`.
+- `split` → existing two-column `<LineupColumn>` pair. Stats come from `game.upcomingBatters` (only the upcoming half-inning's batters get numbers; the rest show `—`).
+
+**`game.lineupStats`** is `{ away: Record<id, {pReach,xSlg}>, home: Record<id, {pReach,xSlg}> } | null`. Populated by `workflows/steps/compute-lineup-stats.ts` — same per-PA pipeline as `compute-nrXi` (Log5 → env → TTOP → framing → defense) but skips the Markov chain, since these are display-only stats. Two parallel `loadLineupSplitsStep` calls (one per team's 9 starters vs the OPPOSING pitcher) feed two `computeLineupStatsStep` calls. Cached batter PA profiles (12h Redis) make repeat loads cheap.
+
+**Defensive alignment is conditional:** when computing AWAY batters' stats, framing/OAA factors apply only when `half === "Top"` (the live alignment IS the home defense). When AWAY is sitting in the dugout, we don't know who the home defense will be, so framing/OAA are disabled (graceful v2 degradation). Same logic mirrored for HOME batters.
+
+## Don't change without thinking (settings panel additions)
+
+- The hoisted `lastFullInning` / `lastLineupStats` / `lastOppPitcherHash` in `workflows/game-watcher.ts` — same bug-#5/#7 trap as the other `lastX` vars. Loop-scoped versions would null-overwrite Redis on every steady-state tick.
+- The lineup-hands enrichment block (`if (lh !== lastEnrichedHash)`) is now positioned BEFORE the `shouldRecompute` block, not after. The new full-inning + lineup-stats compute reads `lastLineups` to extract starter ids; if enrichment ran after, the first recompute would see `lastLineups === null` and silently emit empty `lineupStats`. Don't move it back below.
+- `lineupStats` is keyed by `Record<string, ...>` not `Map<number, ...>` because the watcher serializes `GameState` to JSON and writes it to Redis (CLAUDE.md bug #4). Maps don't round-trip through JSON; string-keyed records do. The client converts back to a `Map` in `<LineupSinglePane>`.
+- The opposing-pitcher hash (`op`) added to the recompute trigger in `workflows/game-watcher.ts` — when the opposite team's listed starter changes (rare; pre-game roster updates), full-inning + opposing-team lineupStats need to refresh. Removing `op` from the trigger would silently freeze those values.
+- `pNoHitEventFullInning === null` when opposing pitcher is unknown — UI renders `—`. **Do not** fall back to `pNoHitEvent`; the user explicitly chose "show '—' until full is computable" so the displayed number always means what its label says.
+- `LineupColumn`'s empty-string label suppression (`{label !== "" && ...}`) is what lets `<LineupSinglePane>` reuse the column without a duplicate header (the team-name tabs above already serve as the label).
+- `SettingsProvider` initializes with `DEFAULTS` on the server and re-reads `localStorage` in a client-only `useEffect`. Without the deferred read, hydration would mismatch when a user has a non-default preference saved.
 
 ## Validator hook quirks (advisory only)
 

@@ -56,14 +56,16 @@ export function LineupColumn({
 
   return (
     <div className="space-y-1">
-      <div
-        className={cn(
-          "text-[10px] uppercase tracking-[0.18em] text-[var(--color-muted)]",
-          headerAlign,
-        )}
-      >
-        <span>{label}</span>
-      </div>
+      {label !== "" && (
+        <div
+          className={cn(
+            "text-[10px] uppercase tracking-[0.18em] text-[var(--color-muted)]",
+            headerAlign,
+          )}
+        >
+          <span>{label}</span>
+        </div>
+      )}
       {lineup === null || lineup.length === 0 ? (
         <div className="rounded border border-dashed border-[var(--color-border)] px-2 py-3 text-center text-[10px] uppercase tracking-wider text-[var(--color-muted)]">
           Lineup pending
