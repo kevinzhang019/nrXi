@@ -59,7 +59,7 @@ export function GameBoard({ initial }: { initial: GameState[] }) {
     up.sort(sortByStartTime);
     fi.sort(sortGames);
     return [
-      { id: "highlighted", label: "Highlighted", games: hi },
+      { id: "highlighted", label: "Start of Inning", games: hi },
       { id: "active", label: "Active", games: ac },
       { id: "upcoming", label: "Upcoming", games: up },
       { id: "finished", label: "Finished", games: fi },

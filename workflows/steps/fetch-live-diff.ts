@@ -66,7 +66,10 @@ export async function fetchLiveDiffStep(opts: {
   }
 
   const newTimecode = feed.metaData?.timeStamp ?? startTimecode ?? "";
-  const recommendedWaitSeconds = Math.max(5, feed.metaData?.wait ?? 10);
+  // MLB's metaData.wait inflates to 30-120s during inning breaks, pitching
+  // changes, and replay reviews. Cap at 15s so live games never lag more
+  // than that behind the feed; floor at 5s to respect rate limits.
+  const recommendedWaitSeconds = Math.min(15, Math.max(5, feed.metaData?.wait ?? 10));
   log.info("step", "fetchLiveDiff:ok", { gamePk, newTimecode, recommendedWaitSeconds });
   return { feed, newTimecode, recommendedWaitSeconds };
 }
