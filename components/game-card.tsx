@@ -96,15 +96,33 @@ export function GameCard({ game }: { game: GameState }) {
 
       <section className="space-y-3 px-4 py-4">
         {game.pitcher && (
-          <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
-            <span>
-              On the bump ·{" "}
-              <span className="text-[var(--color-fg)]">
-                {game.pitcher.name} <span className="text-[var(--color-muted)]">({game.pitcher.throws}HP)</span>
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <span className="text-[13px] text-[var(--color-fg)]">
+                {game.pitcher.name}{" "}
+                <span className="text-[11px] text-[var(--color-muted)]">
+                  ({game.pitcher.throws}HP)
+                </span>
               </span>
-            </span>
+              {game.pitcher.era !== null && Number.isFinite(game.pitcher.era) && (
+                <span className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
+                  ERA{" "}
+                  <span className="font-mono tabular-nums text-[var(--color-fg)]">
+                    {game.pitcher.era.toFixed(2)}
+                  </span>
+                </span>
+              )}
+              {game.pitcher.whip !== null && Number.isFinite(game.pitcher.whip) && (
+                <span className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
+                  WHIP{" "}
+                  <span className="font-mono tabular-nums text-[var(--color-fg)]">
+                    {game.pitcher.whip.toFixed(2)}
+                  </span>
+                </span>
+              )}
+            </div>
             {game.battingTeam && (
-              <span className="text-[10px]">
+              <span className="text-[10px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
                 <span className="text-[var(--color-accent)]">●</span> at bat ·{" "}
                 <span className="text-[var(--color-good)]">●</span> next ½
               </span>

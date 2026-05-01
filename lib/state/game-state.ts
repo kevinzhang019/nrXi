@@ -19,7 +19,13 @@ export type GameState = {
   away: { id: number; name: string; runs: number };
   home: { id: number; name: string; runs: number };
   venue: { id: number; name: string } | null;
-  pitcher: { id: number; name: string; throws: "L" | "R" } | null;
+  pitcher: {
+    id: number;
+    name: string;
+    throws: "L" | "R";
+    era: number | null;
+    whip: number | null;
+  } | null;
   upcomingBatters: PerBatter[];
   pHitEvent: number | null;
   pNoHitEvent: number | null;

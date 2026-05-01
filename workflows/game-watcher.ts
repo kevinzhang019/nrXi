@@ -37,6 +37,28 @@ function readPaInGameForPitcher(feed: LiveFeed, pitcherId: number): number {
   return fromHome ?? fromAway ?? 0;
 }
 
+// Pull current-season ERA / WHIP from the boxscore so the card header can
+// surface them next to the pitcher's name. MLB returns these as strings.
+function readPitcherSeasonStats(
+  feed: LiveFeed,
+  pitcherId: number,
+): { era: number | null; whip: number | null } {
+  const teams = feed.liveData.boxscore?.teams;
+  if (!teams) return { era: null, whip: null };
+  const key = `ID${pitcherId}`;
+  const p = teams.home.players?.[key] ?? teams.away.players?.[key];
+  const s = p?.seasonStats?.pitching;
+  const num = (v: unknown): number | null => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  };
+  return { era: num(s?.era), whip: num(s?.whip) };
+}
+
 // Read the live defensive alignment for v2.1 (catcher framing + fielder OAA).
 // Returns null catcher / empty fielders if the feed hasn't populated yet —
 // computeNrsiStep degrades gracefully to v2 behavior in that case.
@@ -93,6 +115,8 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
   let lastPitcherId: number | null = null;
   let lastPitcherName = "";
   let lastPitcherThrows: "L" | "R" = "R";
+  let lastPitcherEra: number | null = null;
+  let lastPitcherWhip: number | null = null;
 
   for (let loop = 0; loop < MAX_LOOPS; loop++) {
     const tick = await fetchLiveDiffStep({
@@ -184,6 +208,9 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       lastPitcherId = splits.pitcher.id;
       lastPitcherName = splits.pitcher.fullName;
       lastPitcherThrows = splits.pitcher.throws;
+      const seasonStats = readPitcherSeasonStats(tick.feed, splits.pitcher.id);
+      lastPitcherEra = seasonStats.era;
+      lastPitcherWhip = seasonStats.whip;
       lastInningKey = inningKey;
       lastLineupHash = lh;
       lastDefenseKey = dk;
@@ -217,7 +244,13 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
         : null,
       pitcher:
         lastPitcherId !== null
-          ? { id: lastPitcherId, name: lastPitcherName, throws: lastPitcherThrows }
+          ? {
+              id: lastPitcherId,
+              name: lastPitcherName,
+              throws: lastPitcherThrows,
+              era: lastPitcherEra,
+              whip: lastPitcherWhip,
+            }
           : null,
       upcomingBatters: nrsi?.perBatter ?? [],
       pHitEvent: nrsi?.pHitEvent ?? null,

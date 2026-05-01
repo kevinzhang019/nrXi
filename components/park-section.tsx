@@ -80,7 +80,7 @@ export function ParkSection({
 
   return (
     <div className="rounded border border-[var(--color-border)] bg-[var(--color-subtle)]/40">
-      <div className="flex items-stretch gap-4 px-4 py-4">
+      <div className="flex items-stretch gap-3 px-3 py-3">
         <div className="flex shrink-0 flex-col items-center justify-center">
           {venueId != null ? (
             <ParkOutline venueId={venueId} highlighted={highlighted} size={88} />
@@ -103,7 +103,7 @@ export function ParkSection({
               </span>
             )}
           </div>
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2">
             <Stat label="Temp" value={w.tempF != null ? `${Math.round(w.tempF)} °F` : null} />
             <Stat label="Wind" value={wind ? `${wind} mph` : null} />
             <Stat
