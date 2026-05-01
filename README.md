@@ -104,9 +104,9 @@ Full diagram and per-component description in **[docs/ARCHITECTURE.md](docs/ARCH
 
 ## Probability model (in 5 lines)
 
-For each upcoming batter, compute `pReach = (batter's OBP vs pitcher's hand + pitcher's WHIP/3.5 evaluated against batter's hand) / 2`, then multiply by park (Baseball Savant runs index) and weather (covers.com — temp, wind, precip) factors. Switch hitters use the **higher** of both pitcher splits and **higher** of both batter OBPs (intentionally generous). A small Bayesian DP over `(outs, reaches_so_far)` walks the upcoming order forward, terminating at 3 outs, returning `P(>=2 batters reach)`. The complement is `P(NRSI)`. American break-even odds = `q ≥ 0.5 → -100·q/(1-q)`, else `+100·(1-q)/q`.
+For each upcoming batter, build a per-PA outcome distribution `{1B, 2B, 3B, HR, BB, HBP, K, ipOut}` via **generalized multinomial Log5** (Hong / Tango) on shrunken season + last-30-day splits, then scale per outcome by **handedness-keyed park factors** and **HR-weighted weather** (Baseball Savant + covers.com), then apply the **times-through-the-order penalty** keyed off cumulative batters faced. A **24-state base-out Markov chain** iterates the resulting non-stationary kernel forward through the live `(outs, bases)` state until absorption, returning `P(≥1 run scores)`. The complement is `P(NRSI)`, fed through an **isotonic calibration shim** (identity in v1; fitted later from production pairs). American break-even odds = `q ≥ 0.5 → -100·q/(1-q)`, else `+100·(1-q)/q`.
 
-Math derivations, file references, and calibration caveats in **[docs/PROBABILITY_MODEL.md](docs/PROBABILITY_MODEL.md)**.
+Tango league-mean run-frequency anchor (`P(≥1 run | 0 outs, empty) ≈ 0.27`) and 50k-trial Monte Carlo cross-check live in `lib/prob/markov.test.ts`. Math derivations, file references, and calibration caveats in **[docs/PROBABILITY_MODEL.md](docs/PROBABILITY_MODEL.md)**.
 
 ## For Claude / agents
 

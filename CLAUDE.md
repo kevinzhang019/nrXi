@@ -130,8 +130,8 @@ curl -s -H "Authorization: Bearer $KV_REST_API_TOKEN" "$KV_REST_API_URL/keys/wea
 
 - **Live feed lives at `/api/v1.1/...`**, not `/api/v1/...`. v1 returns 404 for the same path.
 - **Split sitCodes are `vl,vr`**, NOT `vsl,vsr`. The wrong codes return an empty `splits[]` array — silent failure, hardest kind of bug.
-- **Splits don't exist for players with no PAs in that split this season.** Code falls back to prior season (`SEASON - 1`) if `stats[0].splits` is empty. See `lib/mlb/splits.ts:loadBatterProfile`/`loadPitcherProfile`.
-- **Switch hitters use the MAX of both splits.** This is a user-specified rule, not standard MLB convention. See `lib/prob/reach-prob.ts:21-28` and the rationale in CLAUDE.md.
+- **Splits don't exist for players with no PAs in that split this season.** Code falls back to prior season (`SEASON - 1`) if `stats[0].splits` is empty. See `lib/mlb/splits.ts:loadBatterProfile`/`loadPitcherProfile` (legacy) and `loadBatterPaProfile`/`loadPitcherPaProfile` (v2 — also blends in last-30-day with graceful fallback).
+- **Switch-hitter platoon resolution defaults to canonical** (`actual` rule — bat opposite of pitcher hand). Legacy `max(L, R)` reachable via `NRSI_SWITCH_HITTER_RULE=max`. Implementation in `lib/prob/log5.ts:effectiveBatterStance` and `batterSideVs`.
 - **`boxscore.teams.*.battingOrder` is empty until lineups post** (~30 min before first pitch). `getUpcomingForCurrentInning` returns `null` if the array is < 9 long.
 - **`outs === 3` flickers at half-inning transitions.** Don't use raw `outs` as the recompute trigger; use a composite `inningKey = "${inning}-${half}-${outs >= 3 ? 'end' : inningState || 'live'}"`.
 - **Respect `metaData.wait`.** The live feed includes a server-side hint (typically 10s). Polling faster wastes calls and risks rate limits.
@@ -165,12 +165,15 @@ All keys come from `lib/cache/keys.ts`. Source of truth — don't hardcode key s
 
 ## Default decisions worth preserving
 
-- **Switch-hitter rule:** `Math.max(L, R)` for both pitcher WHIPs and batter OBPs. Generous toward "batter reaches." Per user spec, NOT standard convention.
-- **Pitcher pseudo-OBP:** `clamp(WHIP / 3.5, 0.18, 0.55)`. Rough overestimate of pitcher's allowed-OBP based on WHIP. Don't change the divisor without explicit user OK.
-- **"Hit event" definition:** 2 batters reach base in the inning. Per user spec.
-- **Decision moment:** `outs === 3` (end of half-inning) OR `(half === "Top" && outs === 0)` (top of inning, no outs yet). These are the betting decision points the user cares about.
+- **v2 model is the default.** Probability pipeline is `Log5 → applyEnv → applyTtop → 24-state Markov → calibrate`. The legacy `pReach` + 2-state DP path is retained in `lib/prob/{reach-prob,inning-dp}.ts` and `loadBatterProfile` / `loadPitcherProfile` for back-compat but is **not invoked by the watcher**. See `docs/PROBABILITY_MODEL.md` for the full math.
+- **Switch-hitter rule:** `actual` (canonical platoon advantage) by default — switch hitters bat from the side opposite the pitcher's throwing hand. Legacy v1 `max(L, R)` rule is reachable via env `NRSI_SWITCH_HITTER_RULE=max`. Implemented in `lib/prob/log5.ts:effectiveBatterStance` and `batterSideVs`.
+- **NRSI definition:** v2 computes `P(NRSI) = 1 − P(≥1 run scores)` directly via the Markov chain — no proxy. The legacy `pHitEvent` field name on `NrsiResult` is preserved for UI back-compat but its semantics are now exact.
+- **Decision moment:** `outs === 3` (end of half-inning) OR `(half === "Top" && outs === 0)` (top of inning, no outs yet).
 - **Break-even rounding:** American odds rounded to nearest 5 in display; raw value used for EV calc.
-- **Probability bounds:** `pReach` clamped to `[0.05, 0.85]` to avoid degenerate edges from bad split data.
+- **League-rate constants** (`LEAGUE_PA` in `lib/mlb/splits.ts`) are 2024–2025 averages by pitcher hand. Refresh annually.
+- **Empirical-Bayes shrinkage** prior strength `n0 = 200` PA. Don't change without a calibration study.
+- **TTOP factors** (`lib/prob/ttop.ts`) come from Tango / Lichtman / Carleton published values. Don't tune without backtest data.
+- **Calibration shim is identity in v1.** Fit isotonic regression from production `(predicted, actual)` pairs once ≥1k inning outcomes accumulate, then load via `loadCalibrator(table)`.
 
 ## Validator hook quirks (advisory only)
 

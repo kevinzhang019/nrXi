@@ -84,10 +84,10 @@ Each step is a `"use step"` function — full Node.js access, automatic retry on
 | `fetch-schedule.ts` | Pull MLB daily schedule | yes |
 | `seed-snapshot.ts` | Write `Pre` stub GameStates for every scheduled game via `hsetnx` (never overwrites a real watcher state) | yes |
 | `fetch-live-diff.ts` | Pull live feed (full or diff-patch), apply patches | yes |
-| `load-lineup-splits.ts` | Resolve pitcher + 9 batters with cached splits | yes |
-| `load-park-factor.ts` | Baseball Savant runs index for home park | yes (degrades to 1.0) |
-| `load-weather.ts` | covers.com scrape, classify wind, compute factor | yes (degrades to 1.0) |
-| `compute-nrsi.ts` | Pure DP — no I/O, but as a step for cache | n/a |
+| `load-lineup-splits.ts` | Resolve pitcher + 9 batters with cached PA-multinomial profiles | yes |
+| `load-park-factor.ts` | Baseball Savant scrape: runs index + per-component factors | yes (degrades to 1.0) |
+| `load-weather.ts` | covers.com scrape: WeatherInfo + per-component factors | yes (degrades to 1.0) |
+| `compute-nrsi.ts` | Log5 + applyEnv + applyTtop + Markov chain | n/a |
 | `publish-update.ts` | Write `GameState` to Redis snapshot + publish | yes |
 | `lock.ts` | `acquire`/`refresh` watcher lock via Redis SETNX | yes |
 
@@ -109,20 +109,27 @@ POST handlers for manual operational triggers — useful for restarting a watche
 
 #### `lib/mlb/`
 - `client.ts` — typed wrappers for `statsapi.mlb.com`. `fetchSchedule`, `fetchLiveFull`, `fetchLiveDiff`, `fetchPerson`, `fetchSplits`, `fetchVenue`. Sets `User-Agent` from env, throws on non-2xx.
-- `types.ts` — Zod schemas (`ScheduleResponse`, `PersonResponse`, `SplitsResponse`) and a `LiveFeed` TypeScript type. Exports `classifyStatus(detailed, abstract)` to bucket detailed states into our `GameStatus` enum (Pre/Live/Final/Delayed/Suspended/Other).
-- `splits.ts` — `loadBatterProfile`, `loadPitcherProfile`. Both use cache-or-fetch via Upstash, with prior-season fallback when current-season splits are empty.
+- `types.ts` — Zod schemas (`ScheduleResponse`, `PersonResponse`, `SplitsResponse`) and a `LiveFeed` TypeScript type covering live `linescore.offense.{first,second,third}` runner ids and `boxscore...battersFaced` for TTOP. Exports `classifyStatus(detailed, abstract)`.
+- `splits.ts` — Two parallel loader sets:
+  - **v1 legacy** — `loadBatterProfile` / `loadPitcherProfile` return scalar `obpVs` / `whipVs`. Retained for the deprecated `pReach` path.
+  - **v2** — `loadBatterPaProfile` / `loadPitcherPaProfile` return per-handedness `paVs: PaOutcomes` (8-outcome multinomial: 1B/2B/3B/HR/BB/HBP/K/ipOut), with empirical-Bayes shrinkage to `LEAGUE_PA` and a last-30-day blend (graceful fallback to season-only).
 - `lineup.ts` — `getUpcomingForCurrentInning(feed)` extracts the next 9 upcoming batters and their pitcher from a `LiveFeed`. Handles `Middle`/`End`/`outs===3` by advancing to the next half-inning. Returns `null` if `boxscore.battingOrder` < 9.
 
 #### `lib/env/`
-- `park.ts` — Baseball Savant scraper. Tries `<script id="park-factors-data">` JSON embed, falls back to a regex over the HTML table. Caches the full table for the season; lookup is by team name with abbreviation mapping.
-- `weather.ts` — covers.com HTML scraper using `cheerio` (declared in `serverExternalPackages` of `next.config.ts`). Matches game blocks by team-name pair, extracts temp/wind/precip/dome via regex on row text. `weatherRunFactor()` converts `WeatherInfo` to a multiplicative factor in [0.85, 1.15].
+- `park.ts` — Baseball Savant scraper. `getParkRunFactor` returns the legacy single runs index. `getParkComponentFactors` returns per-outcome handedness-keyed factors `{hr, triple, double, single, k, bb}`, derived from `index_runs` when component fields aren't published in the scrape. `parseSavantHtml` is the testable seam.
+- `park-orientation.ts` — outfield bearing (degrees from home plate to dead center) for each park, used to classify `windFromDeg` → `out`/`in`/`cross`. Lookup by team name.
+- `weather.ts` — covers.com HTML scraper. `parseCoversHtml(html, awayTeam, homeTeam)` is the testable seam (matches game brick by team city/abbr label, extracts temp/wind/precip/humidity/pressure via regex, classifies wind via the icon's `wind_icons/{compass}.png` filename + park orientation). Returns `WeatherInfo`. Two consumers: `weatherRunFactor` (legacy single scalar, deprecated) and `weatherComponentFactors` (per-outcome multipliers — HR-heavy, K/BB unaffected).
 - `venues.ts` — venue metadata cache, used for ops display only.
+- `__fixtures__/` — captured HTML from Savant + covers.com, used by parse tests so we don't hit the live sites in CI.
 
 #### `lib/prob/`
 Pure, fully unit-tested math.
-- `reach-prob.ts:pReach` — single-batter reach probability.
-- `inning-dp.ts:pAtLeastTwoReach` — Bayesian DP, returns P(hit event).
+- `log5.ts` — Generalized multinomial Log5 (`log5Matchup`), switch-hitter routing (`effectiveBatterStance`, `batterSideVs`), full matchup builder (`matchupPa`), and post-matchup environment scaling (`applyEnv`).
+- `markov.ts` — 24-state base-out Markov chain. `transitionsForOutcome(outcome, state)` for the 8 PA outcomes; `pAtLeastOneRun(start, lineup)` runs the chain forward through the upcoming order.
+- `ttop.ts` — Times-Through-the-Order Penalty: K weakens, BB and HR strengthen each pass through the lineup. `ttoIndex(paInGameForPitcher)`, `applyTtop(pa, paInGameForPitcher)`.
+- `calibration.ts` — Identity calibrator + isotonic interpolation table loader. Ships as no-op until production `(predicted, actual)` pairs accumulate.
 - `odds.ts` — `americanBreakEven`, `impliedProb`, `roundOdds`.
+- **Legacy v1** — `reach-prob.ts:pReach`, `inning-dp.ts:pAtLeastTwoReach`. Retained for back-compat; not used by the watcher.
 
 See **[PROBABILITY_MODEL.md](PROBABILITY_MODEL.md)** for the full math and assumptions.
 
@@ -177,7 +184,8 @@ Cost: we have to wrap every dynamic data access in `<Suspense>` and call `connec
 ## Trade-offs we accepted
 
 - **2-second SSE poll latency.** True Redis pub/sub from Vercel Functions is awkward (each connection is a TCP subscription, Upstash REST doesn't support it, persistent connections fight Fluid Compute's lifecycle). The 2s poll is well under the natural data-change rate (~7s minimum between inning transitions). Sub-second push would be over-engineering. See the conversation history for full analysis.
-- **Park + weather double-counting.** Statcast park factors are *runs* indices that already encompass average weather. Multiplying by our weather factor on top is mildly redundant. Acceptable for v1; if/when we calibrate against actual results we can switch to *batting park factor* (BPF) only.
-- **HTML scraping fragility.** Both Baseball Savant and covers.com return HTML, not stable JSON APIs. Scrapers are wrapped in try/catch with `1.0` fallback, so a layout change degrades gracefully (env factors stop working but the rest of the system is unaffected). Watch for `park:scrape:failed` and `weather:scrape:failed` log lines.
-- **Switch hitters use `max(L, R)`.** Generous. Standard convention is "opposite of pitcher's hand." User-specified, intentional. Documented in CLAUDE.md and PROBABILITY_MODEL.md.
+- **Park + weather double-counting** is now mitigated. v2 applies park factors per outcome (HR most, K/BB not at all) and weather likewise (HR-driven). The combined effect on the multinomial is more principled than the v1 flat multiplier.
+- **HTML scraping fragility.** Both Baseball Savant and covers.com return HTML, not stable JSON APIs. Scrapers are wrapped in try/catch with neutral fallbacks, so a layout change degrades gracefully. Captured fixtures in `lib/env/__fixtures__/` give us regression tests for the parsers without hitting live sites in CI. Watch for `park:scrape:failed` and `weather:scrape:failed` log lines.
+- **Switch hitters use canonical platoon advantage by default** (v2 `actual` rule). Set `NRSI_SWITCH_HITTER_RULE=max` to revive v1's generous `max(L, R)` rule.
+- **Calibration shim is identity.** Ships as a no-op; needs ≥1k production `(predicted, actual)` pairs before isotonic regression can be fit and committed.
 - **No retry budget on the workflow loop.** `MAX_LOOPS = 1500` × ~7s = ~3 hours of game time. Long delays could exhaust this; we'd want to handle re-spawn from the scheduler if a game is suspended overnight.
