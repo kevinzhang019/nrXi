@@ -201,7 +201,7 @@ All keys come from `lib/cache/keys.ts`. Source of truth — don't hardcode key s
 - **v2.1: catcher framing + fielder OAA** (`lib/env/{framing,defense}.ts`, `lib/prob/{framing,defense}.ts`). Framing acts on K and BB cells, OAA on the in-play block. EB shrinkage priors: `n0 = 2000` called pitches for framing, `n0 = 200` opportunities for OAA. Factor clamps: framing `[0.95, 1.05]`, defense `[0.90, 1.10]`. Both default to identity when scrape fails or live alignment is missing — pipeline degrades gracefully to v2.
 - **Robo-ump kill switch:** `NRXI_DISABLE_FRAMING=1` zeroes the framing effect. Flip when MLB's ABS challenge system goes full-season; framing's value collapses overnight.
 - **Live defensive alignment** read from `liveData.linescore.defense.{catcher, first, second, third, shortstop, left, center, right}` ids each tick. The watcher's `defenseAlignmentKey` is part of the recompute trigger so defensive subs auto-invalidate the cache.
-- **User-facing settings defaults:** `predictMode: "full"`, `viewMode: "single"` (`lib/hooks/use-settings.tsx`). Persisted to `localStorage` under `nrxi:settings`. The defaults exist because (a) full-inning is the more "complete" prediction unit users want to bet against, and (b) one-team-at-a-time exposes xOBP/xSLG for all 9 batters, which is what the surface is for. Changing the defaults is a UX call — be deliberate.
+- **User-facing settings defaults:** `predictMode: "full"`, `viewMode: "single"` (`lib/hooks/use-settings.tsx`). Persisted to `localStorage` under `nrxi:settings`. Both defaults are the LEFT option of their segmented toggle in the gear popover — users opt into half-inning / split-view. Changing the defaults is a UX call — be deliberate.
 
 ## Settings panel (predict mode + view mode)
 

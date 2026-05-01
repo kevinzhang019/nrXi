@@ -33,6 +33,7 @@ export function ParkOutline({
       style={{
         vectorEffect: "non-scaling-stroke",
         transition: "stroke 240ms ease-out",
+        transform: "rotate(180deg)",
       }}
     >
       <path d={shape.d} vectorEffect="non-scaling-stroke" />

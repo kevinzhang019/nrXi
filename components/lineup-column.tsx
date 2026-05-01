@@ -72,16 +72,23 @@ export function LineupColumn({
         </div>
       ) : (
         <div className="overflow-x-auto rounded border border-[var(--color-border)]/60 bg-[var(--color-subtle)]/30">
-          <ol className="min-w-max divide-y divide-[var(--color-border)]/40">
+         <div className="min-w-max">
+          <div className="flex items-center gap-2 whitespace-nowrap border-b border-[var(--color-border)]/40 px-1.5 py-1 text-[10px] tracking-[0.18em] text-[var(--color-muted)]">
+            <span className="w-4" aria-hidden />
+            <span className="mr-auto">Batter</span>
+            <span className="w-10 text-right">xOBP</span>
+            <span className="w-10 text-right">xSLG</span>
+          </div>
+          <ol className="divide-y divide-[var(--color-border)]/40">
             {lineup.map((slot) => {
               const starterIsCurrent = isCurrentColumn && slot.starter.id === highlightId;
               const starterIsNext = isNextColumn && slot.starter.id === highlightId;
               const starterIsAccent = starterIsCurrent || starterIsNext;
               return (
-                <li key={slot.spot} className="px-1.5">
+                <li key={slot.spot}>
                   <div
                     className={cn(
-                      "flex items-center gap-2 whitespace-nowrap py-1",
+                      "flex items-center gap-2 whitespace-nowrap px-1.5 py-1",
                       starterIsCurrent && "rounded bg-[var(--color-accent-soft)]/60",
                     )}
                   >
@@ -109,7 +116,7 @@ export function LineupColumn({
                       <div
                         key={sub.id}
                         className={cn(
-                          "flex items-center gap-2 whitespace-nowrap py-0.5 pl-4",
+                          "flex items-center gap-2 whitespace-nowrap py-0.5 pl-[1.375rem] pr-1.5",
                           subIsCurrent && "rounded bg-[var(--color-accent-soft)]/60",
                         )}
                       >
@@ -136,6 +143,7 @@ export function LineupColumn({
               );
             })}
           </ol>
+         </div>
         </div>
       )}
     </div>

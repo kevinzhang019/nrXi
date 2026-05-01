@@ -4,10 +4,13 @@ export function ProbabilityPill({
   pNoHitEvent,
   breakEvenAmerican,
 }: {
-  pNoHitEvent: number | null;
-  breakEvenAmerican: number | null;
+  pNoHitEvent: number | null | undefined;
+  breakEvenAmerican: number | null | undefined;
 }) {
-  if (pNoHitEvent === null || breakEvenAmerican === null) {
+  // Use == to catch both null and undefined. Stale Redis snapshot states
+  // written before the *FullInning fields were added return undefined; the
+  // pill should render "—" rather than NaN%.
+  if (pNoHitEvent == null || breakEvenAmerican == null) {
     return (
       <div className="flex items-baseline justify-between text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
         <span>nrXi</span>

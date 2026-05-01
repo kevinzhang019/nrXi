@@ -112,8 +112,8 @@ export function SettingsButton() {
               value={settings.predictMode}
               onChange={(predictMode) => setSettings({ predictMode })}
               options={[
-                { value: "half", label: "Half-inning" },
                 { value: "full", label: "Full inning" },
+                { value: "half", label: "Half-inning" },
               ]}
             />
             <Segmented<ViewMode>
@@ -121,7 +121,7 @@ export function SettingsButton() {
               value={settings.viewMode}
               onChange={(viewMode) => setSettings({ viewMode })}
               options={[
-                { value: "single", label: "One at a time" },
+                { value: "single", label: "Selector" },
                 { value: "split", label: "Both" },
               ]}
             />
