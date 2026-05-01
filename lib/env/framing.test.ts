@@ -64,11 +64,11 @@ describe("framingFactors", () => {
 });
 
 describe("framingFactors kill switch", () => {
-  const original = process.env.NRSI_DISABLE_FRAMING;
-  beforeEach(() => { process.env.NRSI_DISABLE_FRAMING = "1"; });
+  const original = process.env.NRXI_DISABLE_FRAMING;
+  beforeEach(() => { process.env.NRXI_DISABLE_FRAMING = "1"; });
   afterEach(() => {
-    if (original === undefined) delete process.env.NRSI_DISABLE_FRAMING;
-    else process.env.NRSI_DISABLE_FRAMING = original;
+    if (original === undefined) delete process.env.NRXI_DISABLE_FRAMING;
+    else process.env.NRXI_DISABLE_FRAMING = original;
   });
 
   it("returns neutral regardless of catcher when disabled", () => {

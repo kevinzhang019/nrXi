@@ -10,29 +10,32 @@ import { defenseFactor, type OaaTable } from "@/lib/env/defense";
 import { framingFactors, type FramingTable } from "@/lib/env/framing";
 import { effectiveBatterStance } from "@/lib/prob/log5";
 import { calibrate } from "@/lib/prob/calibration";
+import { xSlgFromPa } from "@/lib/prob/expected-stats";
 import { americanBreakEven, roundOdds } from "@/lib/prob/odds";
 import { log } from "@/lib/log";
 import type { HandCode } from "@/lib/mlb/types";
 
-export type NrsiPerBatter = {
+export type NrXiPerBatter = {
   id: number;
   name: string;
   bats: HandCode;
   /** OBP-equivalent for display continuity with v1: 1 - k - ipOut. */
   pReach: number;
+  /** Expected SLG for this PA: total bases per AB (excludes BB+HBP from denominator). */
+  xSlg: number;
   /** Per-PA outcome distribution after Log5 + env + TTOP + framing + defense. */
   pa: PaOutcomes;
 };
 
-export type NrsiResult = {
+export type NrXiResult = {
   pHitEvent: number; // P(≥1 run) — name kept for back-compat
-  pNoHitEvent: number; // P(NRSI)
+  pNoHitEvent: number; // P(nrXi)
   breakEvenAmerican: number;
   startState: GameState;
-  perBatter: NrsiPerBatter[];
+  perBatter: NrXiPerBatter[];
 };
 
-export async function computeNrsiStep(opts: {
+export async function computeNrXiStep(opts: {
   gamePk: number;
   pitcher: PitcherPaProfile;
   batters: BatterPaProfile[];
@@ -45,7 +48,7 @@ export async function computeNrsiStep(opts: {
   framingTable?: FramingTable;
   catcherId?: number | null;
   fielderIds?: number[]; // 7 non-battery fielders
-}): Promise<NrsiResult> {
+}): Promise<NrXiResult> {
   "use step";
   const {
     gamePk,
@@ -61,7 +64,7 @@ export async function computeNrsiStep(opts: {
     fielderIds,
   } = opts;
 
-  log.info("step", "computeNrsi:start", {
+  log.info("step", "computeNrXi:start", {
     gamePk,
     pitcherId: pitcher.id,
     n: batters.length,
@@ -79,7 +82,7 @@ export async function computeNrsiStep(opts: {
       ? defenseFactor(fielderIds, oaaTable)
       : 1.0;
 
-  const perBatter: NrsiPerBatter[] = [];
+  const perBatter: NrXiPerBatter[] = [];
   const lineup: PaOutcomes[] = [];
 
   for (let i = 0; i < batters.length; i++) {
@@ -96,6 +99,7 @@ export async function computeNrsiStep(opts: {
       name: b.fullName,
       bats: b.bats,
       pReach: 1 - defended.k - defended.ipOut,
+      xSlg: xSlgFromPa(defended),
       pa: defended,
     });
   }
@@ -104,7 +108,7 @@ export async function computeNrsiStep(opts: {
   const pHit = calibrate(rawPHit);
   const pNo = 1 - pHit;
 
-  const result: NrsiResult = {
+  const result: NrXiResult = {
     pHitEvent: pHit,
     pNoHitEvent: pNo,
     breakEvenAmerican: roundOdds(americanBreakEven(pNo)),
@@ -112,7 +116,7 @@ export async function computeNrsiStep(opts: {
     perBatter,
   };
 
-  log.info("step", "computeNrsi:ok", {
+  log.info("step", "computeNrXi:ok", {
     gamePk,
     pHit,
     pNo,

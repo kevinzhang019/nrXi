@@ -6,6 +6,7 @@ export type PerBatter = {
   name: string;
   bats: "L" | "R" | "S";
   pReach: number;
+  xSlg: number;
 };
 
 export type GameState = {

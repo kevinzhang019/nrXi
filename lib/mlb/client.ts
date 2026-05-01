@@ -2,7 +2,7 @@ import { ScheduleResponse, PersonResponse, SplitsResponse, type LiveFeed } from 
 import { log } from "../log";
 
 const STATSAPI = "https://statsapi.mlb.com";
-const UA = process.env.MLB_USER_AGENT || "nrsi-app/0.1";
+const UA = process.env.MLB_USER_AGENT || "nrxi-app/0.1";
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {

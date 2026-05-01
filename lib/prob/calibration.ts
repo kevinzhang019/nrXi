@@ -1,5 +1,5 @@
 /**
- * Calibration shim for NRSI predictions.
+ * Calibration shim for nrXi predictions.
  *
  * The Log5 + Markov chain produces a structurally-correct probability, but
  * any model that takes inputs noisier than the true world will be miscalibrated

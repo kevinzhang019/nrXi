@@ -2,7 +2,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "NRSI — No-Run Scoring Inning",
+  title: "nrXi",
   description: "Live MLB inning probabilities and break-even American odds.",
 };
 

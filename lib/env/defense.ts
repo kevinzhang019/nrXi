@@ -16,7 +16,7 @@ import { clamp } from "../utils";
 const SAVANT_OAA_URL =
   "https://baseballsavant.mlb.com/leaderboard/outs_above_average";
 
-const UA = process.env.MLB_USER_AGENT || "nrsi-app/0.1";
+const UA = process.env.MLB_USER_AGENT || "nrxi-app/0.1";
 
 export type OaaRow = {
   playerId: number;

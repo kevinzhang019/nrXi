@@ -106,7 +106,7 @@ describe("pAtLeastOneRun — sanity bounds", () => {
 });
 
 describe("pAtLeastOneRun — Tango league-mean run-frequency anchor", () => {
-  it("9 league-mean batters from (0 outs, empty) ≈ 0.27 (P(NRSI) ≈ 0.73)", () => {
+  it("9 league-mean batters from (0 outs, empty) ≈ 0.27 (P(nrXi) ≈ 0.73)", () => {
     // Tango's run-frequency table for 2010–2015: P(≥1 run | 0 outs, empty) = 0.268.
     // Modern (2022) MLB observed: 0.266 (Albert / bayesball.github.io).
     // We accept ±0.04 tolerance because:

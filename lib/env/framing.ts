@@ -13,14 +13,14 @@ import { clamp } from "../utils";
  *
  * Source: https://baseballsavant.mlb.com/leaderboard/catcher_framing
  *
- * Robo-ump kill switch: set NRSI_DISABLE_FRAMING=1 to zero the effect when
+ * Robo-ump kill switch: set NRXI_DISABLE_FRAMING=1 to zero the effect when
  * MLB's ABS challenge system goes full-season.
  */
 
 const SAVANT_FRAMING_URL =
   "https://baseballsavant.mlb.com/leaderboard/catcher_framing";
 
-const UA = process.env.MLB_USER_AGENT || "nrsi-app/0.1";
+const UA = process.env.MLB_USER_AGENT || "nrxi-app/0.1";
 
 export type FramingRow = {
   catcherId: number;
@@ -135,7 +135,7 @@ export function framingFactors(
   catcherId: number | null,
   table: FramingTable,
 ): { k: number; bb: number } {
-  if (process.env.NRSI_DISABLE_FRAMING === "1") {
+  if (process.env.NRXI_DISABLE_FRAMING === "1") {
     return { ...NEUTRAL_FRAMING_FACTORS };
   }
   if (catcherId === null || table.size === 0) {

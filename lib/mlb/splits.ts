@@ -5,7 +5,7 @@ import { log } from "../log";
 import type { HandCode, PitchHand } from "./types";
 
 const STATSAPI = "https://statsapi.mlb.com";
-const UA = process.env.MLB_USER_AGENT || "nrsi-app/0.1";
+const UA = process.env.MLB_USER_AGENT || "nrxi-app/0.1";
 
 const SEASON = new Date().getUTCFullYear();
 const FALLBACK_SEASON = SEASON - 1;

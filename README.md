@@ -1,4 +1,4 @@
-# NRSI
+# nrXi
 
 Live MLB **No-Run-Scoring-Inning** probability board. Every active game gets a half-inning-by-half-inning estimate of the chance no run scores, plus the minimum American odds at which a "no run" bet is positive-EV.
 
@@ -7,7 +7,7 @@ Built on Next.js 16 (App Router + Cache Components), Vercel Workflow DevKit, and
 ## What you see
 
 - **Every MLB game for the day**, grouped into four sections in this order: **Highlighted → Active → Upcoming → Finished**. Empty sections are hidden. Cards smoothly fade between sections (via `motion`'s `AnimatePresence` + `layoutId`) when a game's state changes — most commonly when a decision moment starts or ends.
-- Per-card: teams, score, current inning + half + outs, current pitcher (R/L), upcoming batter chips with per-batter `P(reach)` percentages, and a footer with `P(NRSI)` and **break-even American odds**
+- Per-card: teams, score, current inning + half + outs, current pitcher (R/L), upcoming batter chips with per-batter `P(reach)` percentages, **a CAD-blueprint silhouette of the home park** (foul-line wedge + outfield wall, hairline stroke that goes amber alongside the card's ring on decision moments), and a footer with `P(nrXi)` and **break-even American odds**
 - **Decision-moment cards** (end-of-half-inning, or top-of-inning with 0 outs) are surfaced into the **Highlighted** section with an amber ring — the windows where a "no run this inning" bet is being priced
 - **Drill-down at `/games/{gamePk}`** for the full upcoming lineup table with each batter's reach probability
 - Live updates pushed via **SSE** as watchers detect inning transitions; cards re-render in place without remount, so live data keeps flowing through any cross-section animation
@@ -26,8 +26,8 @@ Built on Next.js 16 (App Router + Cache Components), Vercel Workflow DevKit, and
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/kevinzhang019/nrsi-app.git
-cd nrsi-app
+git clone https://github.com/kevinzhang019/nrxi-app.git
+cd nrxi-app
 npm install
 
 # 2. Link the project to Vercel and pull production env vars
@@ -51,7 +51,7 @@ vercel deploy --prod
 vercel curl /api/cron/start-day
 
 # Watch workflow runs
-npx workflow web --backend vercel --project nrsi-app --team kevinzhang019s-projects
+npx workflow web --backend vercel --project nrxi-app --team kevinzhang019s-projects
 
 # Tail runtime logs
 vercel logs <deployment-url>
@@ -72,7 +72,9 @@ lib/
   pubsub/             Snapshot publisher + subscriber iterator
   state/              Canonical GameState type
   hooks/              Client React hooks (useGameStream)
+  parks/              Pre-built ballpark SVG path data (shapes.json + team→venueId map)
 workflows/            Vercel Workflow DevKit: scheduler, game-watcher, steps
+scripts/              One-off build scripts (build-park-shapes.mjs)
 docs/                 Architecture + probability model deep dives
 ```
 
@@ -85,6 +87,7 @@ docs/                 Architecture + probability model deep dives
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Run all unit tests (Vitest) |
 | `npm run workflow:web` | Open Workflow runs UI for the linked project |
+| `npm run build:park-shapes` | Refresh `lib/parks/shapes.json` from `bdilday/GeomMLBStadiums` (one-off; output is committed) |
 | `vercel curl /api/snapshot` | Hit production-protected snapshot endpoint |
 | `vercel curl /api/cron/start-day` | Manually trigger the daily scheduler |
 | `npx workflow inspect runs --backend vercel ...` | List workflow runs |
@@ -93,18 +96,18 @@ docs/                 Architecture + probability model deep dives
 ## Links
 
 - **Production:** https://nrsi-app.vercel.app (Vercel SSO required)
-- **GitHub:** https://github.com/kevinzhang019/nrsi-app
-- **Vercel project:** kevinzhang019s-projects/nrsi-app
+- **GitHub:** https://github.com/kevinzhang019/nrxi-app
+- **Vercel project:** kevinzhang019s-projects/nrxi-app
 
 ## How it works (in 5 lines)
 
-A daily cron triggers `schedulerWorkflow`. For each scheduled game, the scheduler sleeps until 5 minutes before first pitch, then spawns a `gameWatcherWorkflow`. Each watcher holds a Redis lock (one watcher per `gamePk`, ever), polls the MLB live feed via the lightweight `diffPatch` endpoint, recomputes `P(NRSI)` on every half-inning transition, and publishes a `GameState` to a Redis snapshot hash. The `/api/stream` SSE route polls that snapshot hash and pushes diffs to all connected browsers.
+A daily cron triggers `schedulerWorkflow`. For each scheduled game, the scheduler sleeps until 5 minutes before first pitch, then spawns a `gameWatcherWorkflow`. Each watcher holds a Redis lock (one watcher per `gamePk`, ever), polls the MLB live feed via the lightweight `diffPatch` endpoint, recomputes `P(nrXi)` on every half-inning transition, and publishes a `GameState` to a Redis snapshot hash. The `/api/stream` SSE route polls that snapshot hash and pushes diffs to all connected browsers.
 
 Full diagram and per-component description in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ## Probability model (in 5 lines)
 
-For each upcoming batter, build a per-PA outcome distribution `{1B, 2B, 3B, HR, BB, HBP, K, ipOut}` via **generalized multinomial Log5** (Hong / Tango) on shrunken season + last-30-day splits, then scale per outcome by **handedness-keyed park factors** and **HR-weighted weather** (Baseball Savant + covers.com), then apply the **times-through-the-order penalty** keyed off cumulative batters faced. A **24-state base-out Markov chain** iterates the resulting non-stationary kernel forward through the live `(outs, bases)` state until absorption, returning `P(≥1 run scores)`. The complement is `P(NRSI)`, fed through an **isotonic calibration shim** (identity in v1; fitted later from production pairs). American break-even odds = `q ≥ 0.5 → -100·q/(1-q)`, else `+100·(1-q)/q`.
+For each upcoming batter, build a per-PA outcome distribution `{1B, 2B, 3B, HR, BB, HBP, K, ipOut}` via **generalized multinomial Log5** (Hong / Tango) on shrunken season + last-30-day splits, then scale per outcome by **handedness-keyed park factors** and **HR-weighted weather** (Baseball Savant + covers.com), then apply the **times-through-the-order penalty** keyed off cumulative batters faced. A **24-state base-out Markov chain** iterates the resulting non-stationary kernel forward through the live `(outs, bases)` state until absorption, returning `P(≥1 run scores)`. The complement is `P(nrXi)`, fed through an **isotonic calibration shim** (identity in v1; fitted later from production pairs). American break-even odds = `q ≥ 0.5 → -100·q/(1-q)`, else `+100·(1-q)/q`.
 
 Tango league-mean run-frequency anchor (`P(≥1 run | 0 outs, empty) ≈ 0.27`) and 50k-trial Monte Carlo cross-check live in `lib/prob/markov.test.ts`. Math derivations, file references, and calibration caveats in **[docs/PROBABILITY_MODEL.md](docs/PROBABILITY_MODEL.md)**.
 

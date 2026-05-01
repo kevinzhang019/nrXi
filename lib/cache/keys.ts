@@ -10,8 +10,8 @@ export const k = {
   venue: (id: number) => `venue:${id}`,
   weather: (gamePk: number) => `weather:${gamePk}`,
   schedule: (date: string) => `schedule:${date}`,
-  runsByDate: (date: string) => `nrsi:runs:${date}`,
-  watcherLock: (gamePk: number) => `nrsi:lock:${gamePk}`,
-  snapshot: () => `nrsi:snapshot`,
-  pubsubChannel: () => `nrsi:games`,
+  runsByDate: (date: string) => `nrxi:runs:${date}`,
+  watcherLock: (gamePk: number) => `nrxi:lock:${gamePk}`,
+  snapshot: () => `nrxi:snapshot`,
+  pubsubChannel: () => `nrxi:games`,
 };

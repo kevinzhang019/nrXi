@@ -20,11 +20,11 @@ function teamShort(name: string): string {
 export function GameCard({ game }: { game: GameState }) {
   const decision = game.isDecisionMoment;
 
-  // Map upcoming-batter pReach values onto their player ids so the lineup
-  // rows can show probabilities inline for batters in the upcoming sequence.
-  const pReachById = useMemo(() => {
-    const m = new Map<number, number>();
-    for (const b of game.upcomingBatters) m.set(b.id, b.pReach);
+  // Map upcoming-batter xOBP (pReach) and xSLG onto their player ids so the
+  // lineup rows can show stats inline for batters in the upcoming sequence.
+  const statsById = useMemo(() => {
+    const m = new Map<number, { pReach: number; xSlg: number }>();
+    for (const b of game.upcomingBatters) m.set(b.id, { pReach: b.pReach, xSlg: b.xSlg });
     return m;
   }, [game.upcomingBatters]);
 
@@ -136,14 +136,14 @@ export function GameCard({ game }: { game: GameState }) {
             lineup={game.lineups?.away ?? null}
             highlightId={awayHighlightId}
             highlightKind={awayMarker}
-            pReachById={pReachById}
+            statsById={statsById}
           />
           <LineupColumn
             label={teamShort(game.home.name)}
             lineup={game.lineups?.home ?? null}
             highlightId={homeHighlightId}
             highlightKind={homeMarker}
-            pReachById={pReachById}
+            statsById={statsById}
           />
         </div>
 

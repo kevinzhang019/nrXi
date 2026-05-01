@@ -5,7 +5,7 @@ import { log } from "../log";
 const SAVANT_URL =
   "https://baseballsavant.mlb.com/leaderboard/statcast-park-factors?type=year&year=";
 
-const UA = process.env.MLB_USER_AGENT || "nrsi-app/0.1";
+const UA = process.env.MLB_USER_AGENT || "nrxi-app/0.1";
 
 type ParkRow = {
   team: string;

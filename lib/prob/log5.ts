@@ -7,7 +7,7 @@ import type { WeatherComponentFactors } from "../env/weather";
 export type SwitchHitterRule = "actual" | "max";
 
 const DEFAULT_SWITCH_RULE: SwitchHitterRule =
-  (process.env.NRSI_SWITCH_HITTER_RULE as SwitchHitterRule | undefined) ?? "actual";
+  (process.env.NRXI_SWITCH_HITTER_RULE as SwitchHitterRule | undefined) ?? "actual";
 
 /**
  * Generalized multinomial Log5 (Hong, SABR Journal):

@@ -26,7 +26,7 @@
    │     fetchLiveDiff (timecode resume)       │                  │
    │     detect inningKey change               │ on transition:   │
    │     loadLineupSplits + park + weather  ◀──┤  recompute       │
-   │     computeNrsi (DP)                      │                  │
+   │     computeNrXi (DP)                      │                  │
    │     publishUpdate ──┐                     │                  │
    │     refresh lock    │                     │                  │
    │     sleep ~7-30s    │                     │                  │
@@ -36,8 +36,8 @@
                          ▼
               ┌──────────────────────┐
               │   Upstash Redis      │   keys: lib/cache/keys.ts
-              │   - nrsi:snapshot    │   ←── single source of truth
-              │   - nrsi:games chan  │       for client UI
+              │   - nrxi:snapshot    │   ←── single source of truth
+              │   - nrxi:games chan  │       for client UI
               │   - cached splits/   │
               │     park/weather     │
               └──────────┬───────────┘
@@ -61,18 +61,18 @@
 ### Workflows
 
 #### `workflows/scheduler.ts` — `schedulerWorkflow`
-Daily entry point. Fetches today's schedule via `fetchScheduleStep`, immediately calls `seedSnapshotStep(games)` to write a `Pre` stub `GameState` for every scheduled game so the dashboard's Upcoming section is populated before any watcher starts. Then iterates games and `sleep`s until 5 minutes before each first pitch. At each wake, calls `startWatcherStep` (which wraps `start(gameWatcherWorkflow, ...)` because `start()` cannot run inside a workflow context). Persists `{gamePk: runId}` to Redis under `nrsi:runs:{date}` for ops visibility. After spawning all watchers, sleeps 12h and exits.
+Daily entry point. Fetches today's schedule via `fetchScheduleStep`, immediately calls `seedSnapshotStep(games)` to write a `Pre` stub `GameState` for every scheduled game so the dashboard's Upcoming section is populated before any watcher starts. Then iterates games and `sleep`s until 5 minutes before each first pitch. At each wake, calls `startWatcherStep` (which wraps `start(gameWatcherWorkflow, ...)` because `start()` cannot run inside a workflow context). Persists `{gamePk: runId}` to Redis under `nrxi:runs:{date}` for ops visibility. After spawning all watchers, sleeps 12h and exits.
 
 #### `workflows/game-watcher.ts` — `gameWatcherWorkflow`
 The durable per-game poller. Receives `{ gamePk, ownerId, awayTeamName, homeTeamName }`.
 
 **Lifecycle:**
-1. Acquire `nrsi:lock:{gamePk}` (90s TTL). If held by another, exit immediately with `{ reason: "lock-held" }`.
+1. Acquire `nrxi:lock:{gamePk}` (90s TTL). If held by another, exit immediately with `{ reason: "lock-held" }`.
 2. Loop up to `MAX_LOOPS = 1500`:
    - `fetchLiveDiffStep` with last seen `metaData.timeStamp` for tiny diff payloads (falls back to full feed if no prior state).
    - Compute `inningKey = "${inning}-${half}-${end|live}"` and `lineupHash`. Set `shouldRecompute = status === "Live" && upcoming != null && pitcherId != null && (inningKey changed || lineup changed)`.
-   - If recompute: parallel fetch `loadLineupSplitsStep`, `loadParkFactorStep`, `loadWeatherStep`. Then `computeNrsiStep`. Persist results into hoisted `lastNrsi`, `lastEnv`, `lastPitcher*` (workflow scope, not loop scope — see CLAUDE.md bug #5).
-   - Build `GameState` from current feed + last computed nrsi. `publishUpdateStep` writes to `nrsi:snapshot` hash.
+   - If recompute: parallel fetch `loadLineupSplitsStep`, `loadParkFactorStep`, `loadWeatherStep`. Then `computeNrXiStep`. Persist results into hoisted `lastNrXi`, `lastEnv`, `lastPitcher*` (workflow scope, not loop scope — see CLAUDE.md bug #5).
+   - Build `GameState` from current feed + last computed nrXi. `publishUpdateStep` writes to `nrxi:snapshot` hash.
    - If `status === "Final"`, return `{ reason: "final" }`.
    - Refresh lock TTL, then `sleep(waitSec)` adaptive: Live→`metaData.wait` (~7-10s), Pre→30s, Delayed/Suspended→300s.
 
@@ -88,7 +88,7 @@ Each step is a `"use step"` function — full Node.js access, automatic retry on
 | `load-park-factor.ts` | Baseball Savant scrape: runs index + per-component factors | yes (degrades to 1.0) |
 | `load-weather.ts` | covers.com scrape: WeatherInfo + per-component factors | yes (degrades to 1.0) |
 | `load-defense.ts` | Statcast scrapes: OAA + framing tables (parallel, 24h cache) | yes (degrades to neutral) |
-| `compute-nrsi.ts` | Log5 + applyEnv + applyTtop + applyFraming + applyDefense + Markov chain | n/a |
+| `compute-nrXi.ts` | Log5 + applyEnv + applyTtop + applyFraming + applyDefense + Markov chain. Derives per-PA `pReach`/xOBP and `xSlg` from the final multinomial. | n/a |
 | `publish-update.ts` | Write `GameState` to Redis snapshot + publish | yes |
 | `lock.ts` | `acquire`/`refresh` watcher lock via Redis SETNX | yes |
 
@@ -98,10 +98,10 @@ Each step is a `"use step"` function — full Node.js access, automatic retry on
 GET handler invoked by Vercel Cron at 13:00 UTC. Optional `Bearer $CRON_SECRET` auth. Calls `start(schedulerWorkflow)` and returns `{ ok, runId }`. Also callable manually for testing.
 
 #### `app/api/snapshot/route.ts`
-GET. Reads `nrsi:snapshot` via `lib/pubsub/publisher.ts:getSnapshot`, sorts (Live > Delayed > Suspended > Pre > Final, then by inning desc), returns `{ games, ts }`. Used by the SSR initial paint.
+GET. Reads `nrxi:snapshot` via `lib/pubsub/publisher.ts:getSnapshot`, sorts (Live > Delayed > Suspended > Pre > Final, then by inning desc), returns `{ games, ts }`. Used by the SSR initial paint.
 
 #### `app/api/stream/route.ts`
-GET. Server-Sent Events stream. On connect, sends a `snapshot` event with current state, then enters a `while !abort` loop polling `nrsi:snapshot` every 2s and emitting `update` events for any changed `gamePk`. 15s heartbeat prevents proxy timeouts. EventSource auto-reconnects on Vercel's ~300s function lifecycle boundary.
+GET. Server-Sent Events stream. On connect, sends a `snapshot` event with current state, then enters a `while !abort` loop polling `nrxi:snapshot` every 2s and emitting `update` events for any changed `gamePk`. 15s heartbeat prevents proxy timeouts. EventSource auto-reconnects on Vercel's ~300s function lifecycle boundary.
 
 #### `app/api/workflows/{scheduler,game-watcher}/route.ts`
 POST handlers for manual operational triggers — useful for restarting a watcher after cancellation, or kicking off the scheduler outside the cron window.
@@ -121,9 +121,15 @@ POST handlers for manual operational triggers — useful for restarting a watche
 - `park-orientation.ts` — outfield bearing (degrees from home plate to dead center) for each park, used to classify `windFromDeg` → `out`/`in`/`cross`. Lookup by team name.
 - `weather.ts` — covers.com HTML scraper. `parseCoversHtml(html, awayTeam, homeTeam)` is the testable seam (matches game brick by team city/abbr label, extracts temp/wind/precip/humidity/pressure via regex, classifies wind via the icon's `wind_icons/{compass}.png` filename + park orientation). Returns `WeatherInfo`. Two consumers: `weatherRunFactor` (legacy single scalar, deprecated) and `weatherComponentFactors` (per-outcome multipliers — HR-heavy, K/BB unaffected).
 - `defense.ts` — Statcast OAA leaderboard scraper (`parseOaaHtml`). `loadOaaTable(season)` returns `Map<playerId, OaaRow>` (cached 24h). `defenseFactor(fielderIds, table)` sums shrunken OAA across the seven non-battery fielders to produce a multiplier in `[0.90, 1.10]` for the in-play block.
-- `framing.ts` — Statcast catcher framing leaderboard scraper (`parseFramingHtml`). `loadFramingTable(season)` returns `Map<catcherId, FramingRow>` (cached 24h). `framingFactors(catcherId, table)` returns `{k, bb}` factors clamped to `[0.95, 1.05]`. `NRSI_DISABLE_FRAMING=1` is the robo-ump kill switch.
+- `framing.ts` — Statcast catcher framing leaderboard scraper (`parseFramingHtml`). `loadFramingTable(season)` returns `Map<catcherId, FramingRow>` (cached 24h). `framingFactors(catcherId, table)` returns `{k, bb}` factors clamped to `[0.95, 1.05]`. `NRXI_DISABLE_FRAMING=1` is the robo-ump kill switch.
 - `venues.ts` — venue metadata cache, used for ops display only.
 - `__fixtures__/` — captured HTML from Savant + covers.com, used by parse tests so we don't hit the live sites in CI.
+
+#### `lib/parks/`
+Pre-built ballpark silhouette data, generated once at build time.
+- `shapes.json` — keyed by MLB venueId. Each entry has `{ name, viewBox, d }` where `d` is a single SVG path string (foul-line wedge + outfield outer wall, normalized into a 100×100 viewBox with home plate at the bottom).
+- `team-to-venue.ts` — hand-curated map from the GeomMLBStadiums team slug (`angels`, `blue_jays`, …) to MLB Stats API `venueId`, plus a `venueId → park name` map for component labels.
+- Refresh via `npm run build:park-shapes` (see `scripts/build-park-shapes.mjs`).
 
 #### `lib/prob/`
 Pure, fully unit-tested math.
@@ -133,6 +139,7 @@ Pure, fully unit-tested math.
 - `framing.ts` — `applyFraming(pa, {k, bb})` reweights the K and BB cells of the multinomial using the live catcher's framing factors.
 - `defense.ts` — `applyDefense(pa, factor)` reweights the in-play block (1B/2B/3B/ipOut) using the seven non-battery fielders' aggregated OAA.
 - `calibration.ts` — Identity calibrator + isotonic interpolation table loader. Ships as no-op until production `(predicted, actual)` pairs accumulate.
+- `expected-stats.ts` — Per-PA derived rate stats: `xObpFromPa(pa)` (= `1 - k - ipOut`, equal to `pReach`) and `xSlgFromPa(pa)` (= bases per AB, excluding BB+HBP from the denominator). Pure helpers used by `computeNrXiStep` to populate `NrXiPerBatter.xSlg` for the lineup UI.
 - `odds.ts` — `americanBreakEven`, `impliedProb`, `roundOdds`.
 - **Legacy v1** — `reach-prob.ts:pReach`, `inning-dp.ts:pAtLeastTwoReach`. Retained for back-compat; not used by the watcher.
 
@@ -152,16 +159,24 @@ The canonical `GameState` type that flows from watcher → Redis → SSE → Rea
 ### Frontend
 
 #### `app/page.tsx`
-Server component. Suspense-wraps `<GameBoardLoader />` which calls `getInitialGames()` (cached read of `nrsi:snapshot`). Renders header + grid. Skeleton fallback during initial paint.
+Server component. Suspense-wraps `<GameBoardLoader />` which calls `getInitialGames()` (cached read of `nrxi:snapshot`). Renders header + grid. Skeleton fallback during initial paint.
 
 #### `components/game-board.tsx`
 Client. Uses `useGameStream(initial)` to maintain a live `Map<gamePk, GameState>`. Partitions games into four sections — **Highlighted** (`isDecisionMoment === true`), **Active** (Live/Delayed/Suspended and not in a decision moment), **Upcoming** (Pre / Other, sorted by `startTime`), **Finished** (Final). Empty sections are hidden. Each section's grid is wrapped in `motion`'s `<AnimatePresence mode="popLayout">`; each card is a `<motion.div layout layoutId={`card-${gamePk}`}>` so a card moving between sections (e.g. when `isDecisionMoment` flips) cross-fades smoothly without remounting `<GameCard>`. Live SSE updates flow through unaffected since the inner `<GameCard key={gamePk}>` keeps reconciling.
 
 #### `components/game-card.tsx`
-Per-game card. Two team rows (mono-spaced score, small-caps name), `<InningState>` block (top/bottom indicator, outs as filled circles), pitcher line, upcoming-batter chips with per-batter `pReach`%, env chips, and a footer `<ProbabilityPill>` with `P(NRSI)` + break-even American odds. Decision moments add `ring-2 ring-amber-400/60` and a brief flash animation on update.
+Per-game card. Two team rows (mono-spaced score, small-caps name), `<InningState>` block (top/bottom indicator, outs as filled circles), pitcher line, two `<LineupColumn>`s (away + home) with each batter rendered as **hand · F. Lastname · xOBP · xSLG** and the row highlighted when that batter is currently at bat or leads off the next half. Each team's lineup is wrapped in `overflow-x-auto` with `min-w-max` so the whole list translates as a unit on narrow widths. Footer: `<ProbabilityPill>` with `P(nrXi)` + break-even American odds. Decision moments add `ring-2 ring-amber-400/60` and a brief flash animation on update.
 
 #### `app/games/[pk]/page.tsx`
-Drilldown. Full upcoming-lineup table with each batter's `pReach`%, plus the three-column NRSI/odds/env summary. Same Suspense + connection() pattern as the index page.
+Drilldown. Full upcoming-lineup table with each batter's `pReach`%, plus the three-column nrXi/odds/env summary. Same Suspense + connection() pattern as the index page.
+
+#### `components/park-outline.tsx`
+Inline SVG glyph rendering each home park's silhouette (foul lines + outfield wall) at ~28px. Reads from `lib/parks/shapes.json` keyed by `game.venue.id`. Hairline 1.25px stroke (`vector-effect: non-scaling-stroke`) — `var(--color-muted)` by default, transitions to `var(--color-accent)` over 240ms when `highlighted` is true so the outline goes amber in lockstep with the card's decision-moment ring. Returns `null` when the venueId is unknown so card layout doesn't shift. Slotted into the env-chip row of `<GameCard>` where the text label "Park" used to sit — the outline literally is the label, with the numeric park run-factor rendered to its right.
+
+#### Build-time scripts
+
+##### `scripts/build-park-shapes.mjs`
+One-off Node script (`npm run build:park-shapes`). Fetches `https://raw.githubusercontent.com/bdilday/GeomMLBStadiums/master/inst/extdata/mlb_stadia_paths.csv` (~900KB, ~16k rows × 30 parks), filters to `foul_lines` + `outfield_outer` segments, computes a per-park bounding box, scales into a 100×100 viewBox with 4-unit padding, **flips y** (CSV +y is into outfield → SVG +y is downward, so home plate ends up at the bottom), and emits the deterministic `lib/parks/shapes.json`. Output is committed; no runtime CSV fetch.
 
 #### `lib/hooks/use-game-stream.ts`
 Client hook. Opens an `EventSource` to `/api/stream`, listens for `snapshot` and `update` events, dispatches into a `useReducer` that maintains `{ byPk, freshIds }`. Auto-reconnects via the browser's built-in EventSource behavior.
@@ -170,7 +185,7 @@ Client hook. Opens an `EventSource` to `/api/stream`, listens for `snapshot` and
 
 ### Single-poller pattern (lock per gamePk)
 
-Every browser hitting MLB directly would burn through the soft rate limit (~10 req/sec/IP) within minutes once a few users connect. Instead, exactly one watcher polls per game (enforced by `nrsi:lock:{gamePk}`), publishes to Redis, and the SSE route fans out to all clients. With 15 concurrent live games and a ~7s poll cadence, the global request rate is ~2 req/sec — comfortable.
+Every browser hitting MLB directly would burn through the soft rate limit (~10 req/sec/IP) within minutes once a few users connect. Instead, exactly one watcher polls per game (enforced by `nrxi:lock:{gamePk}`), publishes to Redis, and the SSE route fans out to all clients. With 15 concurrent live games and a ~7s poll cadence, the global request rate is ~2 req/sec — comfortable.
 
 The lock has a 90s TTL and is refreshed every loop iteration. If a watcher process dies (deploy, crash), another can take over after the TTL expires. The `ownerId` is stored in the lock so `refreshWatcherLockStep` can also detect ownership transfer.
 
@@ -191,6 +206,6 @@ Cost: we have to wrap every dynamic data access in `<Suspense>` and call `connec
 - **2-second SSE poll latency.** True Redis pub/sub from Vercel Functions is awkward (each connection is a TCP subscription, Upstash REST doesn't support it, persistent connections fight Fluid Compute's lifecycle). The 2s poll is well under the natural data-change rate (~7s minimum between inning transitions). Sub-second push would be over-engineering. See the conversation history for full analysis.
 - **Park + weather double-counting** is now mitigated. v2 applies park factors per outcome (HR most, K/BB not at all) and weather likewise (HR-driven). The combined effect on the multinomial is more principled than the v1 flat multiplier.
 - **HTML scraping fragility.** Both Baseball Savant and covers.com return HTML, not stable JSON APIs. Scrapers are wrapped in try/catch with neutral fallbacks, so a layout change degrades gracefully. Captured fixtures in `lib/env/__fixtures__/` give us regression tests for the parsers without hitting live sites in CI. Watch for `park:scrape:failed` and `weather:scrape:failed` log lines.
-- **Switch hitters use canonical platoon advantage by default** (v2 `actual` rule). Set `NRSI_SWITCH_HITTER_RULE=max` to revive v1's generous `max(L, R)` rule.
+- **Switch hitters use canonical platoon advantage by default** (v2 `actual` rule). Set `NRXI_SWITCH_HITTER_RULE=max` to revive v1's generous `max(L, R)` rule.
 - **Calibration shim is identity.** Ships as a no-op; needs ≥1k production `(predicted, actual)` pairs before isotonic regression can be fit and committed.
 - **No retry budget on the workflow loop.** `MAX_LOOPS = 1500` × ~7s = ~3 hours of game time. Long delays could exhaust this; we'd want to handle re-spawn from the scheduler if a game is suspended overnight.

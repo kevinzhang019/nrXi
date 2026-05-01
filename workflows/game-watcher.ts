@@ -5,7 +5,7 @@ import { loadLineupSplitsStep } from "./steps/load-lineup-splits";
 import { loadParkFactorStep } from "./steps/load-park-factor";
 import { loadWeatherStep } from "./steps/load-weather";
 import { loadDefenseStep } from "./steps/load-defense";
-import { computeNrsiStep } from "./steps/compute-nrsi";
+import { computeNrXiStep } from "./steps/compute-nrXi";
 import { publishUpdateStep } from "./steps/publish-update";
 import { getUpcomingForCurrentInning, lineupHash } from "@/lib/mlb/lineup";
 import { extractLineups, extractLinescore, extractBatterFocus } from "@/lib/mlb/extract";
@@ -61,7 +61,7 @@ function readPitcherSeasonStats(
 
 // Read the live defensive alignment for v2.1 (catcher framing + fielder OAA).
 // Returns null catcher / empty fielders if the feed hasn't populated yet —
-// computeNrsiStep degrades gracefully to v2 behavior in that case.
+// computeNrXiStep degrades gracefully to v2 behavior in that case.
 function readDefenseAlignment(feed: LiveFeed): {
   catcherId: number | null;
   fielderIds: number[];
@@ -110,7 +110,7 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
   let lastInningKey = "";
   let lastLineupHash = "";
   let lastDefenseKey = "";
-  let lastNrsi: Awaited<ReturnType<typeof computeNrsiStep>> | null = null;
+  let lastNrXi: Awaited<ReturnType<typeof computeNrXiStep>> | null = null;
   let lastEnv: { parkRunFactor: number; weatherRunFactor: number; weather?: Record<string, unknown> } | null = null;
   let lastPitcherId: number | null = null;
   let lastPitcherName = "";
@@ -187,7 +187,7 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       ]);
       const startState = readMarkovStartState(tick.feed);
       const paInGameForPitcher = readPaInGameForPitcher(tick.feed, upcoming.pitcherId!);
-      lastNrsi = await computeNrsiStep({
+      lastNrXi = await computeNrXiStep({
         gamePk: input.gamePk,
         pitcher: splits.pitcher,
         batters: splits.batters,
@@ -216,7 +216,7 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
       lastDefenseKey = dk;
     }
 
-    const nrsi = lastNrsi;
+    const nrXi = lastNrXi;
     const env = lastEnv;
 
     const decision = isDecisionMoment({ status, inning, half, outs, inningState });
@@ -252,10 +252,10 @@ export async function gameWatcherWorkflow(input: WatcherInput) {
               whip: lastPitcherWhip,
             }
           : null,
-      upcomingBatters: nrsi?.perBatter ?? [],
-      pHitEvent: nrsi?.pHitEvent ?? null,
-      pNoHitEvent: nrsi?.pNoHitEvent ?? null,
-      breakEvenAmerican: nrsi?.breakEvenAmerican ?? null,
+      upcomingBatters: nrXi?.perBatter ?? [],
+      pHitEvent: nrXi?.pHitEvent ?? null,
+      pNoHitEvent: nrXi?.pNoHitEvent ?? null,
+      breakEvenAmerican: nrXi?.breakEvenAmerican ?? null,
       env,
       lineups: extractLineups(tick.feed),
       linescore: extractLinescore(tick.feed),

@@ -10,7 +10,7 @@ export function ProbabilityPill({
   if (pNoHitEvent === null || breakEvenAmerican === null) {
     return (
       <div className="flex items-baseline justify-between text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)]">
-        <span>NRSI</span>
+        <span>nrXi</span>
         <span>—</span>
       </div>
     );
@@ -21,7 +21,7 @@ export function ProbabilityPill({
   return (
     <div className="flex items-baseline justify-between gap-3">
       <div>
-        <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)]">P(NRSI)</div>
+        <div className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted)]">P(nrXi)</div>
         <div className="font-mono text-xl tabular-nums">{pct}%</div>
       </div>
       <div className="text-right">

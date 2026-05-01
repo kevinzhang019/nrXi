@@ -1,12 +1,12 @@
 # Probability model — v2 (Log5 + 24-state Markov)
 
-The model that drives `P(NRSI)` and the break-even American odds shown on every card.
+The model that drives `P(nrXi)` and the break-even American odds shown on every card.
 
 ## Definitions
 
 - **Plate appearance (PA) outcome** — one of `{single, double, triple, hr, bb, hbp, k, ipOut}`. The eight outcomes are mutually exclusive and exhaustive; rates sum to 1. `ipOut` (in-play out) is the residual covering ground outs, fly outs, sac flies, double plays, etc.
-- **NRSI** — No-Run-Scoring-Inning. We compute `P(NRSI) = 1 − P(≥1 run scores)`.
-- **Break-even American odds** — the American odds at which a "no run" bet has zero expected value, given the model's `q = P(NRSI)`. Quoted lines better than break-even are positive-EV; worse are negative-EV.
+- **nrXi** — No-Run-Scoring-Inning. We compute `P(nrXi) = 1 − P(≥1 run scores)`.
+- **Break-even American odds** — the American odds at which a "no run" bet has zero expected value, given the model's `q = P(nrXi)`. Quoted lines better than break-even are positive-EV; worse are negative-EV.
 
 ## Two-stage pipeline
 
@@ -95,7 +95,7 @@ Each side is built by:
 `effectiveBatterStance(batter.bats, pitcher.throws)` and `batterSideVs(batter, pitcher, rule)` resolve which split to read:
 
 - **`actual` (default)** — switch hitters always face from the side opposite the pitcher's throwing hand (canonical platoon advantage). For a non-switch hitter, the rule degenerates to `batterSide = pitcher.throws`, `pitcherSide = batter.bats`.
-- **`max` (legacy v1)** — pick the side with the highest non-out rate for the batter and the most permissive side for the pitcher. Reachable via `NRSI_SWITCH_HITTER_RULE=max`.
+- **`max` (legacy v1)** — pick the side with the highest non-out rate for the batter and the most permissive side for the pitcher. Reachable via `NRXI_SWITCH_HITTER_RULE=max`.
 
 ### Park factors (`lib/env/park.ts`)
 
@@ -168,7 +168,7 @@ Catcher framing is the skill of receiving borderline pitches in a way that makes
 
 **Apply step** (`applyFraming` in `lib/prob/framing.ts`): multiplies the K and BB cells of the multinomial, then renormalizes. Mass that flows out of K and BB redistributes proportionally across the other six cells (mostly into `ipOut`). 1B/2B/3B/HR/HBP unchanged at the multiplier level.
 
-**Robo-ump kill switch**: `NRSI_DISABLE_FRAMING=1` returns identity factors. Wire it in once MLB's ABS challenge system goes full-season — framing's value collapses overnight.
+**Robo-ump kill switch**: `NRXI_DISABLE_FRAMING=1` returns identity factors. Wire it in once MLB's ABS challenge system goes full-season — framing's value collapses overnight.
 
 ## Stage 1.7 — Fielder defense / OAA (`lib/env/defense.ts`, `lib/prob/defense.ts`)
 
@@ -265,7 +265,7 @@ Reference: Niculescu-Mizil & Caruana, *Predicting Good Probabilities with Superv
 
 ## American odds break-even — `lib/prob/odds.ts`
 
-Given `q = P(NRSI)` (probability the bet wins):
+Given `q = P(nrXi)` (probability the bet wins):
 
 ```
 americanBreakEven(q) =
@@ -275,7 +275,30 @@ americanBreakEven(q) =
 
 Round-trips through `impliedProb(american)`. A quoted line `A` is **positive-EV** iff `impliedProb(A) < q`. Display value uses `roundOdds(...)` rounded to nearest 5; the raw unrounded value is used for any actual EV comparison.
 
-## End-to-end (`workflows/steps/compute-nrsi.ts`)
+## Derived per-PA stats (`lib/prob/expected-stats.ts`)
+
+Two scoreboard-friendly rate stats are derived from each batter's post-pipeline `PaOutcomes` and surfaced in the UI alongside the watcher output. They are pure functions of the multinomial — no extra computation cost — and both are exact under the model.
+
+### xOBP — `xObpFromPa(pa)`
+
+```
+xOBP = 1 − k − ipOut
+     = single + double + triple + hr + bb + hbp
+```
+
+The probability that this PA reaches base. Identical in value to the legacy `pReach` field on `NrXiPerBatter` (preserved by name for UI back-compat); the two are interchangeable.
+
+### xSLG — `xSlgFromPa(pa)`
+
+```
+xSLG = (1·single + 2·double + 3·triple + 4·hr) / (1 − bb − hbp)
+```
+
+Expected SLG for this PA: total bases per AB. The `(1 − bb − hbp)` denominator strips walks and HBPs to match conventional SLG (bases per AB, not bases per PA). Range is `[0, 4]` — at the limit (every PA an HR) xSLG = 4.0. A small `1e-9` floor on the denominator guards against pathological inputs; under the model `bb + hbp` never approach 1.
+
+Both stats are computed by `computeNrXiStep` and threaded through `NrXiPerBatter → PerBatter → GameState`, then displayed on each batter row in the dashboard lineup column.
+
+## End-to-end (`workflows/steps/compute-nrXi.ts`)
 
 ```ts
 for each upcoming batter b at index i:
@@ -284,33 +307,36 @@ for each upcoming batter b at index i:
   ttoAdj  = applyTtop(enved, paInGameForPitcher + i)
   framed  = applyFraming(ttoAdj, framingFactors(catcherId, framingTable))
   pa_i    = applyDefense(framed, defenseFactor(fielderIds, oaaTable))
+  pReach_i = 1 - pa_i.k - pa_i.ipOut             // == xOBP
+  xSlg_i   = xSlgFromPa(pa_i)
 
 pHit  = calibrate(pAtLeastOneRun(startState, [pa_1, ..., pa_n]))
 pNo   = 1 - pHit
 odds  = roundOdds(americanBreakEven(pNo))
 ```
 
-Result shape (`NrsiResult`):
+Result shape (`NrXiResult`):
 
 ```ts
 {
   pHitEvent: number,            // P(≥1 run) — name kept for UI back-compat
-  pNoHitEvent: number,          // P(NRSI)
+  pNoHitEvent: number,          // P(nrXi)
   breakEvenAmerican: number,
   startState: { outs, bases },
   perBatter: Array<{
     id, name, bats,
-    pReach: number,             // OBP-equivalent for UI: 1 - k - ipOut
-    pa: PaOutcomes,             // full multinomial after Log5+env+ttop
+    pReach: number,             // OBP-equivalent for UI: 1 - k - ipOut (== xOBP)
+    xSlg: number,               // expected SLG: bases / (1 - bb - hbp)
+    pa: PaOutcomes,             // full multinomial after Log5+env+ttop+framing+defense
   }>,
 }
 ```
 
-The watcher publishes this verbatim into `GameState`, which the SSE stream pushes to clients.
+The watcher publishes this verbatim into `GameState`, which the SSE stream pushes to clients. The `pa` field rides along untyped on the client (it's not declared on `PerBatter`) — only `pReach` and `xSlg` are part of the typed client contract.
 
 ## Verification
 
-- **Unit tests** in `lib/prob/{log5,markov,ttop}.test.ts` and `lib/env/{park,weather}.test.ts`.
+- **Unit tests** in `lib/prob/{log5,markov,ttop,expected-stats}.test.ts` and `lib/env/{park,weather}.test.ts`.
 - **Tango league-mean run-frequency anchor**: 9 league-average batters from `(0 outs, empty)` → `P(≥1 run) ∈ [0.22, 0.32]` (Tango's published value 2010–2015 is 0.268; Albert 2022 confirms 0.266).
 - **Monte Carlo cross-check**: 50k inning simulations using the same per-PA distribution agree with the closed-form chain to within 1pp.
 - **Renormalization invariants**: Log5, applyEnv, applyTtop, applyFraming, applyDefense all preserve sum-to-1 across every outcome shape.
