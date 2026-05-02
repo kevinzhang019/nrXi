@@ -1,0 +1,22 @@
+# Railway service config for the nrXi watcher supervisor.
+#
+# Runtime model: cron-triggered, scale-to-zero. Railway's cron fires the
+# supervisor at 12:00 UTC daily. The supervisor schedules a watcher task per
+# game (delayed start at gameDate - 90s), runs them in-process until each
+# game's Final, then exits cleanly once the active set is empty AND we're
+# past the 06:00 UTC-next-day cutoff. Process exit triggers Railway to scale
+# the container down to zero — no compute is billed until the next cron
+# firing. See services/supervisor.ts:defaultIdleDeadline for the cutoff math.
+#
+# restartPolicyType = "NEVER" is critical: with ON_FAILURE or ALWAYS, the
+# supervisor's intentional clean exit would be treated as a failure and the
+# container would be restarted indefinitely, defeating scale-to-zero.
+#
+# No [build] section needed — Railway's Railpack builder auto-detects the
+# Node.js project and runs `npm install` (which now includes `tsx` as a
+# regular dependency, not devDependency, so the deployed container has it).
+
+[deploy]
+startCommand = "npx tsx bin/supervisor.ts"
+cronSchedule = "0 12 * * *"
+restartPolicyType = "NEVER"
