@@ -3,6 +3,7 @@ import { withRetry } from "./lib/with-retry";
 import { runWatcher } from "./run-watcher";
 import { fetchScheduleStep, type ScheduledGame } from "../workflows/steps/fetch-schedule";
 import { seedSnapshotStep } from "../workflows/steps/seed-snapshot";
+import { pruneStaleSnapshots } from "./lib/prune-snapshots";
 import { todayInTz } from "../lib/utils";
 import { log } from "../lib/log";
 
@@ -27,6 +28,11 @@ export type SupervisorOpts = {
   // Override for tests — defaults to a real schedule fetch + Redis seed.
   fetchScheduleFn?: (date: string) => Promise<ScheduledGame[]>;
   seedSnapshotFn?: (games: ScheduledGame[]) => Promise<{ seeded: number }>;
+  pruneStaleSnapshotsFn?: (todaysGamePks: number[]) => Promise<{
+    total: number;
+    kept: number;
+    deleted: number;
+  }>;
   runWatcherFn?: typeof runWatcher;
   // Override for tests — defaults to "tomorrow at 06:00 UTC". Returning a Date
   // lets tests synthesise a deadline in the very-near future to verify the
@@ -64,6 +70,7 @@ export async function runSupervisor(opts: SupervisorOpts = {}): Promise<{
   const date = opts.date ?? todayInTz("America/New_York");
   const fetchSchedule = opts.fetchScheduleFn ?? ((d: string) => fetchScheduleStep(d));
   const seedSnapshot = opts.seedSnapshotFn ?? ((g: ScheduledGame[]) => seedSnapshotStep(g));
+  const pruneSnapshotsFn = opts.pruneStaleSnapshotsFn ?? pruneStaleSnapshots;
   const runWatcherImpl = opts.runWatcherFn ?? runWatcher;
   const computeIdleDeadline = opts.computeIdleDeadlineFn ?? defaultIdleDeadline;
   const idleInterval = opts.idleCheckIntervalMs ?? IDLE_CHECK_INTERVAL_MS;
@@ -77,6 +84,16 @@ export async function runSupervisor(opts: SupervisorOpts = {}): Promise<{
     await withRetry(() => seedSnapshot(games), { signal, label: "seedSnapshot" });
     log.info("supervisor", "seeded");
   }
+
+  // Drop any snapshot field-keys not in today's schedule. Required because
+  // `publishGameState` resets the hash's 24h TTL on every tick, so games from
+  // a prior runtime that was mid-watching when paused/crashed can otherwise
+  // hang around as "Live" zombies on the dashboard. Idempotent — safe to call
+  // every cron firing.
+  await withRetry(() => pruneSnapshotsFn(games.map((g) => g.gamePk)), {
+    signal,
+    label: "pruneStaleSnapshots",
+  });
 
   // pending = scheduled-but-not-yet-finished. A game stays in this set from
   // schedule time until its watcher returns (Final, lock-held, max-loops, or

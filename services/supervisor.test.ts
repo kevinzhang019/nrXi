@@ -34,11 +34,13 @@ describe("runSupervisor", () => {
   it("exits idle immediately when there are no games and the deadline is past", async () => {
     const fetchScheduleFn = vi.fn().mockResolvedValue([]);
     const seedSnapshotFn = vi.fn().mockResolvedValue({ seeded: 0 });
+    const pruneStaleSnapshotsFn = vi.fn().mockResolvedValue({ total: 0, kept: 0, deleted: 0 });
     const runWatcherFn = vi.fn();
     const result = await runSupervisor({
       date: "2026-04-15",
       fetchScheduleFn,
       seedSnapshotFn,
+      pruneStaleSnapshotsFn,
       runWatcherFn,
       // Past deadline so the very first idle check exits.
       computeIdleDeadlineFn: () => new Date(Date.now() - 1000),
@@ -48,6 +50,9 @@ describe("runSupervisor", () => {
     expect(fetchScheduleFn).toHaveBeenCalledTimes(1);
     // No games -> seed not called (avoids a no-op Redis call).
     expect(seedSnapshotFn).not.toHaveBeenCalled();
+    // Prune still runs even with zero games — that's how off-season days
+    // cleanly wipe the prior day's stale snapshot entries.
+    expect(pruneStaleSnapshotsFn).toHaveBeenCalledWith([]);
     expect(runWatcherFn).not.toHaveBeenCalled();
   });
 
@@ -61,6 +66,7 @@ describe("runSupervisor", () => {
       date: "2026-04-15",
       fetchScheduleFn: vi.fn().mockResolvedValue(games),
       seedSnapshotFn: vi.fn().mockResolvedValue({ seeded: 2 }),
+      pruneStaleSnapshotsFn: vi.fn().mockResolvedValue({ total: 0, kept: 0, deleted: 0 }),
       runWatcherFn,
       computeIdleDeadlineFn: () => new Date(Date.now() - 1000),
       idleCheckIntervalMs: 5,
@@ -85,6 +91,7 @@ describe("runSupervisor", () => {
       date: "2026-04-15",
       fetchScheduleFn: vi.fn().mockResolvedValue(games),
       seedSnapshotFn: vi.fn().mockResolvedValue({ seeded: 1 }),
+      pruneStaleSnapshotsFn: vi.fn().mockResolvedValue({ total: 0, kept: 0, deleted: 0 }),
       runWatcherFn,
       // Past deadline so the only thing keeping us alive is `pending.size > 0`.
       computeIdleDeadlineFn: () => new Date(Date.now() - 1000),
@@ -117,6 +124,7 @@ describe("runSupervisor", () => {
       date: "2026-04-15",
       fetchScheduleFn: vi.fn().mockResolvedValue(games),
       seedSnapshotFn: vi.fn().mockResolvedValue({ seeded: 1 }),
+      pruneStaleSnapshotsFn: vi.fn().mockResolvedValue({ total: 0, kept: 0, deleted: 0 }),
       runWatcherFn,
       // Far-future deadline so only abort can end the supervisor.
       computeIdleDeadlineFn: () => new Date(Date.now() + 60 * 60 * 1000),
