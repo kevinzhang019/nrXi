@@ -40,6 +40,7 @@ export function LineupColumn({
   highlightId,
   highlightKind,
   statsById,
+  paIds,
   align = "left",
 }: {
   label: string;
@@ -47,6 +48,7 @@ export function LineupColumn({
   highlightId: number | null;
   highlightKind: Marker;
   statsById?: Map<number, BatterStats>;
+  paIds?: Set<number> | null;
   align?: "left" | "right";
 }) {
   const headerAlign = align === "right" ? "text-right" : "text-left";
@@ -98,12 +100,14 @@ export function LineupColumn({
               const starterIsCurrent = isCurrentColumn && slot.starter.id === highlightId;
               const starterIsNext = isNextColumn && slot.starter.id === highlightId;
               const starterIsAccent = starterIsCurrent || starterIsNext;
+              const starterInPa = paIds?.has(slot.starter.id) ?? false;
               return (
                 <li key={slot.spot}>
                   <div
                     className={cn(
                       "flex items-center gap-2 whitespace-nowrap px-1.5 py-1",
-                      starterIsCurrent && "rounded bg-[var(--color-accent-soft)]/60",
+                      (starterIsCurrent || starterInPa) &&
+                        "rounded bg-[var(--color-accent-soft)]/60",
                     )}
                   >
                     <span className="w-4 font-mono text-[10px] uppercase tabular-nums text-[var(--color-muted)]">
@@ -143,12 +147,14 @@ export function LineupColumn({
                     const subIsCurrent = isCurrentColumn && sub.id === highlightId;
                     const subIsNext = isNextColumn && sub.id === highlightId;
                     const subIsAccent = subIsCurrent || subIsNext;
+                    const subInPa = paIds?.has(sub.id) ?? false;
                     return (
                       <div
                         key={sub.id}
                         className={cn(
                           "flex items-center gap-2 whitespace-nowrap py-0.5 pl-[1.375rem] pr-1.5",
-                          subIsCurrent && "rounded bg-[var(--color-accent-soft)]/60",
+                          (subIsCurrent || subInPa) &&
+                            "rounded bg-[var(--color-accent-soft)]/60",
                         )}
                       >
                         <span className="w-4 font-mono text-[10px] uppercase tabular-nums text-[var(--color-muted)]/70">

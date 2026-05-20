@@ -6,7 +6,6 @@ const NOW_MS = Date.parse("2026-05-03T22:00:00.000Z");
 
 function state(overrides: Partial<GameState> & { gamePk: number; updatedAt: string }): GameState {
   return {
-    gamePk: overrides.gamePk,
     status: "Live",
     detailedState: "In Progress",
     inning: 9,
@@ -35,7 +34,6 @@ function state(overrides: Partial<GameState> & { gamePk: number; updatedAt: stri
     battingTeam: "away",
     currentBatterId: null,
     nextHalfLeadoffId: null,
-    updatedAt: overrides.updatedAt,
     ...overrides,
   };
 }

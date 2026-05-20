@@ -32,8 +32,13 @@ function WindStat({ mph, cardinal }: { mph: number | null | undefined; cardinal:
   const hasSpeed = mph != null && Number.isFinite(mph);
   const isCalm = cardinal === "calm" || mph === 0;
   const fromDeg = cardinal && cardinal in COMPASS_TO_DEG ? COMPASS_TO_DEG[cardinal] : null;
-  // Arrow points the direction wind is going (FROM + 180°). Asset points up (north) by default.
-  const rotateDeg = fromDeg != null ? (fromDeg + 180) % 360 : null;
+  // Arrow points the direction wind is going (FROM + 180°); asset points up
+  // (north) by default. The extra +180° matches <ParkOutline>'s
+  // `transform: rotate(180deg)` so the arrow reads correctly against the
+  // flipped park silhouette it sits beside. Display-only — the model wind
+  // calc (lib/env/park-orientation.ts) uses true compass wind and is
+  // unaffected by this rotation.
+  const rotateDeg = fromDeg != null ? (fromDeg + 180 + 180) % 360 : null;
 
   return (
     <div className="flex flex-col">

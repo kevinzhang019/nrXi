@@ -148,10 +148,12 @@ Stroke transitions `var(--color-muted) → var(--color-accent)` over 240ms when 
 Pipeline:
 1. **Source data:** `bdilday/GeomMLBStadiums/inst/extdata/mlb_stadia_paths.csv` — the polygon data Baseball Savant uses for spray charts. ~16k rows × 30 parks, columns `team,x,y,segment`.
 2. **Build script:** `scripts/build-park-shapes.mjs` (run via `npm run build:park-shapes`) fetches the CSV, filters to `foul_lines` + `outfield_outer`, normalizes each park into a 100×100 viewBox with home plate at the bottom, and writes `lib/parks/shapes.json` keyed by MLB venueId (mapped through `lib/parks/team-to-venue.ts`).
-3. **Runtime:** `<ParkOutline venueId={game.venue?.id} highlighted={decision} />` (where `decision = decisionMomentFor(game, settings.predictMode)`) reads the JSON, renders the path, returns `null` if the venueId is unknown so layout doesn't shift.
+3. **Runtime:** `<ParkOutline venueId={game.venue?.id} highlighted={decision} />` (where `decision = decisionMomentFor(game, settings.predictMode)`) reads the JSON, renders the path, returns `null` if the venueId is unknown so layout doesn't shift. The `<svg>` carries a deliberate `transform: rotate(180deg)` (a polish stylization, commit `4d367fe`) **on top of** the build script's `ty` y-flip — purely cosmetic, it only rotates the drawn silhouette.
 4. **Pre-game cards:** `seedSnapshotStep` populates `venue.id` from the schedule so the outline appears in the Upcoming section before any watcher starts. Park run-factor renders as `—` until the watcher's first publish.
 
 Refresh path: `npm run build:park-shapes` whenever a team relocates or a new park opens. Output is committed; deterministic re-runs produce byte-identical JSON.
+
+**Wind arrow alignment.** The `<WindStat>` glyph in `components/park-section.tsx` sits beside the silhouette in `<ParkSection>`. Its rotation is `(fromDeg + 180 + 180) % 360`: the first `+180` converts the meteorological FROM bearing into the direction the wind is *going* (asset points north-up by default); the **second `+180` matches `<ParkOutline>`'s `rotate(180deg)`** so the arrow reads correctly against the flipped silhouette next to it. The doubled 180 is intentional — it exists only because the park silhouette is stylized, and is **display-only**: the probability model's wind path (`windFromDeg` + real `outfieldDeg` → `classifyWind` → `weatherComponentFactors`, in `lib/env/park-orientation.ts` / `lib/env/weather.ts`) operates in true real-world compass space and is completely independent of every visual flip. If the silhouette's `rotate(180deg)` is ever removed, drop the second `+180` here too — but never touch the model calc to "match" the drawing; the drawing matches the calc, not the other way around.
 
 ---
 

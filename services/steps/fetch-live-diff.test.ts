@@ -33,68 +33,51 @@ function makeFeed(opts: {
 }
 
 describe("chooseRecommendedWaitSeconds", () => {
-  it("caps at 5s during active live PA so outs surface within ~5s", () => {
-    const wait = chooseRecommendedWaitSeconds(
-      makeFeed({ wait: 12, abstract: "Live", inningState: "Top", outs: 1 }),
-    );
-    expect(wait).toBe(5);
-  });
-
-  it("keeps 15s cap during half-inning breaks (inningState=Middle)", () => {
-    const wait = chooseRecommendedWaitSeconds(
-      makeFeed({ wait: 60, abstract: "Live", inningState: "Middle", outs: 0 }),
-    );
-    expect(wait).toBe(15);
-  });
-
-  it("keeps 15s cap at the 3-out flicker so structural reload isn't rushed", () => {
-    const wait = chooseRecommendedWaitSeconds(
-      makeFeed({ wait: 30, abstract: "Live", inningState: "Top", outs: 3 }),
-    );
-    expect(wait).toBe(15);
-  });
-
-  it("uses 15s cap when not Live (Pre/Final)", () => {
+  it("returns a flat 2s during active live PAs", () => {
     expect(
       chooseRecommendedWaitSeconds(
-        makeFeed({ wait: 30, abstract: "Preview", outs: 0 }),
+        makeFeed({ wait: 12, abstract: "Live", inningState: "Top", outs: 1 }),
       ),
-    ).toBe(15);
-    expect(
-      chooseRecommendedWaitSeconds(
-        makeFeed({ wait: 30, abstract: "Final", outs: 0 }),
-      ),
-    ).toBe(15);
+    ).toBe(2);
   });
 
-  it("honors MLB's wait when smaller than the cap, but never below 5s", () => {
+  it("returns 2s during inning breaks too (no 15s break cushion)", () => {
     expect(
       chooseRecommendedWaitSeconds(
-        makeFeed({ wait: 8, abstract: "Live", inningState: "Bottom", outs: 1 }),
+        makeFeed({ wait: 60, abstract: "Live", inningState: "Middle", outs: 0 }),
       ),
-    ).toBe(5);
+    ).toBe(2);
     expect(
       chooseRecommendedWaitSeconds(
-        makeFeed({ wait: 2, abstract: "Live", inningState: "Bottom", outs: 1 }),
+        makeFeed({ wait: 30, abstract: "Live", inningState: "End", outs: 0 }),
       ),
-    ).toBe(5);
-    expect(
-      chooseRecommendedWaitSeconds(
-        makeFeed({ wait: 12, abstract: "Live", inningState: "End", outs: 0 }),
-      ),
-    ).toBe(12);
+    ).toBe(2);
   });
 
-  it("defaults to 10→capped when wait field is absent", () => {
+  it("returns 2s at the 3-out flicker", () => {
+    expect(
+      chooseRecommendedWaitSeconds(
+        makeFeed({ wait: 30, abstract: "Live", inningState: "Top", outs: 3 }),
+      ),
+    ).toBe(2);
+  });
+
+  it("ignores MLB's metaData.wait hint", () => {
+    // Even very large or very small wait hints are clamped to 2s.
+    expect(
+      chooseRecommendedWaitSeconds(
+        makeFeed({ wait: 120, abstract: "Live", inningState: "Bottom", outs: 1 }),
+      ),
+    ).toBe(2);
+    expect(
+      chooseRecommendedWaitSeconds(
+        makeFeed({ wait: 1, abstract: "Live", inningState: "Bottom", outs: 1 }),
+      ),
+    ).toBe(2);
     expect(
       chooseRecommendedWaitSeconds(
         makeFeed({ abstract: "Live", inningState: "Top", outs: 2 }),
       ),
-    ).toBe(5);
-    expect(
-      chooseRecommendedWaitSeconds(
-        makeFeed({ abstract: "Live", inningState: "Middle", outs: 0 }),
-      ),
-    ).toBe(10);
+    ).toBe(2);
   });
 });

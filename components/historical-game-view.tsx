@@ -67,6 +67,20 @@ export function HistoricalGameView({
     [innByKey],
   );
 
+  // Batter ids that had a PA in the currently-selected inning/half. Top-half
+  // plays attribute to the away lineup; Bottom-half plays to the home lineup.
+  // Used by GameCard's lineup section to highlight rows of players who batted.
+  const paBatterIds = useMemo(() => {
+    const away = new Set<number>();
+    const home = new Set<number>();
+    for (const p of plays) {
+      if (p.inning !== selection.inning) continue;
+      if (selection.kind === "half" && p.half !== selection.half) continue;
+      (p.half === "Top" ? away : home).add(p.batterId);
+    }
+    return { away, home };
+  }, [plays, selection]);
+
   if (!game.finalSnapshot) {
     return (
       <p className="text-sm text-[var(--color-muted)]">
@@ -102,6 +116,7 @@ export function HistoricalGameView({
         inningAvailability={availability}
         onSelectInning={onSelectInning}
         onSelectHalf={onSelectHalf}
+        paBatterIds={paBatterIds}
       />
       <HistoricalPlaysPanel plays={plays} selection={selection} />
     </div>

@@ -1,5 +1,5 @@
 import { fetchLiveDiff, fetchLiveFull } from "../../lib/mlb/client";
-import { classifyStatus, type LiveFeed } from "../../lib/mlb/types";
+import type { LiveFeed } from "../../lib/mlb/types";
 import { log } from "../../lib/log";
 
 export type WatcherTick = {
@@ -9,41 +9,29 @@ export type WatcherTick = {
 };
 
 /**
- * Decide how long to sleep before the next poll.
+ * Live-cadence tick interval. Flat 2s regardless of inning state.
  *
- * MLB's `metaData.wait` reflects when *they* expect the next state change —
- * during inning breaks, pitching changes, and replay reviews it inflates to
- * 30–120s. Capping it at 15s for those cases is fine; the half hasn't begun
- * yet, so polling faster wouldn't surface anything sooner.
+ * Active PAs: outs / hits / walks can land at any moment; 2s is the floor
+ * below which MLB's own ~1–3s event-to-feed ingest lag dominates.
  *
- * During active play (Live + at-bat in progress), MLB still tends to return
- * `wait ≈ 10s`, but real events (outs, walks, hits) can land at any moment.
- * We tighten the cap to 5s in that window so an out arriving just after a
- * poll waits at most ~5s for the next one. Trade-off is ~2× more diffPatch
- * calls during live PAs; MLB's Stats API tolerates this comfortably and the
- * Vercel Active CPU bump is small (Phase 2 Markov is ~50–200ms per tick).
+ * Inning breaks: pitching changes and lineup edits are surfaced by the
+ * structural-key change detector, which only triggers a heavy reload when
+ * the key actually changes. Polling faster during breaks doesn't load the
+ * feed any harder — diffPatch responses are near-empty when nothing has
+ * moved — and it shaves up to ~13s off the latency at the moment MLB
+ * flips to the next half-inning.
  *
- * Floor stays at 5s — honor MLB's `wait` only when it's genuinely smaller,
- * which is rare.
+ * Cost: ~7.5 req/s worst-case across 15 concurrent games, comfortably under
+ * MLB's anecdotal ~50 req/s soft limit. Railway Active CPU busy fraction is
+ * dominated by the recompute step (~50–200ms when structural-key changes);
+ * idle ticks are mostly network wait. We ignore MLB's `metaData.wait` hint
+ * — community wrappers do the same on live ticks and our payload (2–20 KB
+ * diff) is far below the level the hint is calibrated for.
  *
  * Exported for unit tests.
  */
-export function chooseRecommendedWaitSeconds(feed: LiveFeed): number {
-  const wait = feed.metaData?.wait ?? 10;
-  const status = classifyStatus(
-    feed.gameData.status.detailedState,
-    feed.gameData.status.abstractGameState,
-  );
-  const ls = feed.liveData.linescore;
-  const inningState = (ls.inningState || "").toLowerCase();
-  const outs = ls.outs ?? 0;
-  const isActivePa =
-    status === "Live" &&
-    inningState !== "middle" &&
-    inningState !== "end" &&
-    outs < 3;
-  const cap = isActivePa ? 5 : 15;
-  return Math.min(cap, Math.max(5, wait));
+export function chooseRecommendedWaitSeconds(_feed: LiveFeed): number {
+  return 2;
 }
 
 /**

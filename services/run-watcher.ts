@@ -138,15 +138,18 @@ export type WatcherResult = {
 };
 
 const SEASON = new Date().getUTCFullYear();
-// Loop ceiling sized to comfortably outlast a normal MLB game at the active
-// 5s PA-polling cadence: 5000 × 5s ≈ 7h. Pre-game ticks at 1800s/tick add
-// at most ~24 iterations across an entire 12h pre-game window, so this cap
-// is dominated by the live phase. Historically MAX_LOOPS was 1500 (≈2h)
-// and watchers hit it during the late innings, exiting silently and leaving
-// the dashboard's snapshot stuck on a "Live" 9th — see `services/lib/
-// finalize-game.ts` for the graceful-exit cleanup that the budget exits
-// now run.
-const MAX_LOOPS = 5000;
+// Loop ceiling sized to comfortably outlast a worst-case extra-inning MLB
+// game at the flat 2s live-polling cadence: 20000 × 2s ≈ 11h. A normal 3h
+// game runs ~5400 ticks; a 5h extra-inning game ~9000. Pre-game ticks at
+// the 30/5/1 min ramp add ~20 iterations across the 6h pre-game window, so
+// the live phase dominates. The cap exists only as defense against runaway
+// loops; the supervisor's 06:00 UTC idle-exit deadline (~18h post-cron) and
+// MAX_RUNTIME_MS are the real wall-clock ceilings. Historically MAX_LOOPS
+// was 1500 (≈2h at the legacy 5s cadence) and watchers hit it during the
+// late innings, exiting silently and leaving the dashboard's snapshot
+// stuck on a "Live" 9th — see `services/lib/finalize-game.ts` for the
+// graceful-exit cleanup that the budget exits now run.
+const MAX_LOOPS = 20000;
 // Hard wall-clock cap. With `PRE_GAME_LEAD_MS = 6h` in the supervisor, a
 // realistic max watcher lifetime is ~11h (6h pre-game + 5h game with
 // extras/delays). The supervisor's own idle-exit deadline (06:00 UTC next
@@ -712,10 +715,23 @@ export async function runWatcher(
         // actually begins — not whatever we computed hours earlier. The first
         // live tick recomputes (atBatIndex flips, structuralKey changes) and
         // the capture fires from that recompute.
+        //
+        // Key the capture by `upcoming.inning` / `upcoming.half`, NOT the raw
+        // linescore `inning` / `half`. At a half-boundary tick (3rd out →
+        // inningState middle/end) the feed still reports the half that just
+        // ended, but readMarkovStartState short-circuits to a clean start
+        // state and computeNrXiStep used upcoming.upcomingBatterIds — so
+        // `lastNrXi` is the prediction FOR the upcoming half. The row's
+        // (inning, half) must agree with what the prediction describes. This
+        // also makes the boundary tick (= "prior outs were 2/3, new half is
+        // fresh") the canonical first-write moment instead of the later
+        // leadoff PA tick. Paired with the ignoreDuplicates insert in
+        // upsertInningPrediction so the first write per (game_pk, inning,
+        // half) wins and no cross-watcher restart can overwrite it.
         if (status === "Live") {
           const captureCandidate = buildInningCapture({
-            inning,
-            half,
+            inning: upcoming?.inning ?? null,
+            half: upcoming?.half ?? null,
             nrXi: lastNrXi,
             pitcher: state.pitcher,
             awayPitcher: state.awayPitcher,
@@ -809,7 +825,17 @@ export async function runWatcher(
 
         let waitSec = 30;
         if (status === "Live") waitSec = tick.recommendedWaitSeconds;
-        else if (status === "Pre") waitSec = 1800;
+        else if (status === "Pre") {
+          // Ramp toward first pitch so the Pre→Live transition surfaces
+          // within ~1 min instead of up to 30 min. Tightening cadence in the
+          // last 30 min also lets pre-game-compute previews land faster.
+          const startIso = tick.feed.gameData.datetime?.dateTime;
+          const startMs = startIso ? Date.parse(startIso) : Number.NaN;
+          const msToStart = Number.isFinite(startMs) ? startMs - Date.now() : Number.POSITIVE_INFINITY;
+          if (msToStart <= 5 * 60_000) waitSec = 60;
+          else if (msToStart <= 30 * 60_000) waitSec = 300;
+          else waitSec = 1800;
+        }
         else if (status === "Delayed" || status === "Suspended") waitSec = 300;
 
         // sleepMs throws AbortError on abort — caught by the outer try/catch

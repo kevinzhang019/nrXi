@@ -36,6 +36,7 @@ export function GameCard({
   inningAvailability,
   onSelectInning,
   onSelectHalf,
+  paBatterIds,
 }: {
   game: GameState;
   historical?: boolean;
@@ -44,6 +45,7 @@ export function GameCard({
   inningAvailability?: InningAvailability;
   onSelectInning?: (n: number) => void;
   onSelectHalf?: (n: number, half: "Top" | "Bottom") => void;
+  paBatterIds?: { away: Set<number> | null; home: Set<number> | null };
 }) {
   const { settings } = useSettings();
   const decision = !historical && decisionMomentFor(game, settings.predictMode);
@@ -198,6 +200,7 @@ export function GameCard({
                     highlightId={null}
                     highlightKind={null}
                     statsById={statsById}
+                    paIds={paBatterIds?.away ?? null}
                   />
                 </div>
                 <div className="space-y-2">
@@ -208,6 +211,7 @@ export function GameCard({
                     highlightId={null}
                     highlightKind={null}
                     statsById={statsById}
+                    paIds={paBatterIds?.home ?? null}
                   />
                 </div>
               </div>

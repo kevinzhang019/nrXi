@@ -369,7 +369,7 @@ The original code comment (lines 73-74 of the pre-fix `finalize-game.ts`) explai
 - Per-boundary `upsertInningPrediction` is **fire-and-forget** (`void upsertInningPrediction(...).catch(log.warn)`). Awaiting would couple watcher tick latency to Supabase response time. Sweep backstops gaps.
 - `capturedInnings` is in-process only — removing it from `saveWatcherState` is the load-bearing change. Re-adding it isn't harmful but defeats the bundle-size win.
 - `sweepFinalize` is wired into BOTH the idle loop (60s cadence) AND supervisor exit. Removing the exit-time call leaves the very last game-of-day's archive incomplete until tomorrow's cron.
-- The lazy stub `games` row in `upsertInningPrediction` uses `ignoreDuplicates: true` (= `ON CONFLICT DO NOTHING`). Switching to a regular UPSERT would clobber a partially-finalized row each time the next inning lands.
+- **Both** writes in `upsertInningPrediction` use `ignoreDuplicates: true` (= `ON CONFLICT DO NOTHING`): the lazy stub `games` row (keyed `game_pk`) and the prediction row (keyed `game_pk,inning,half`). The stub-row reasoning was always "switching to a regular UPSERT would clobber a partially-finalized row each time the next inning lands"; the prediction row was made first-write-wins later — see **bug #15**. The capture is also keyed by `upcoming.inning` / `upcoming.half`, not the raw linescore half (bug #15, defect 1). Reverting either is the regression to watch for.
 - `performGracefulExit` does not touch Supabase. Reintroducing DB writes there couples the watcher's lifecycle to the archive — which was the bug-#11/#12 class. `GracefulExitDeps` shape is `{ publishUpdate, clearWatcherState }`; expanding it back to fetchLiveDiff/persistFinishedGame/buildPlayRows is the regression to watch for.
 
 ## Bug 13: Live game stuck "Scheduled" on dashboard for hours — `PitchHand` schema rejects switch-throwers
@@ -487,3 +487,50 @@ if (status === "Pre") {
 - `npx tsc --noEmit` clean (unrelated pre-existing duplicate-prop warnings in `lib/history/rollup-plays.test.ts` and `services/lib/stale-live-detector.test.ts`).
 - `npx vitest run` — 299/299 passing.
 - Manual: confirmed no fixture / test references `state.linescore` truthiness for a Pre-status game; `<GameCard>` snapshot tests don't exercise the pre-game line-score branch.
+
+## Bug 15: Persisted per-inning prediction is for the wrong half / overwritten by a later recompute
+
+**Symptom:** users observed `inning_predictions` rows that didn't match the half they were keyed to — a row nominally describing the top of an inning held a forecast that only makes sense for the bottom of that inning, or a row held a prediction that was clearly recomputed mid-game rather than at the moment the half-inning began. The corruption appeared sporadically, with no clean pattern across games.
+
+This is a direct follow-on to **bug #12**'s "Later refactor" — the per-boundary `upsertInningPrediction` write path was correct in its *mechanism* (predictions durable from the moment computed) but carried two latent defects in *what* it wrote and *whether a later write could clobber it*.
+
+**Root cause — two cooperating defects:**
+
+*Defect 1 — capture key off-by-one-half at boundary ticks.* `services/run-watcher.ts` passed the raw linescore `inning` / `half` (derived from `ls.currentInning` / `ls.isTopInning` at the top of the loop) into `buildInningCapture`. But on a half-boundary tick (3rd out registered, `inningState` → `"Middle"`/`"End"`):
+
+- the live feed still reports the half that *just ended* — `ls.isTopInning` hasn't flipped, `ls.currentInning` unchanged;
+- `readMarkovStartState` (`services/start-state.ts:23-27`) short-circuits to a clean start state (`{0,0}` regulation, `{0,2}` Manfred extras);
+- `getUpcomingForCurrentInning` (`lib/mlb/lineup.ts:54-61`) flips `upcoming` to the *next* half via the `isMiddleOrEnd` predicate, and `computeNrXiStep` consumes `upcoming.upcomingBatterIds` + `upcoming.pitcherId`;
+- so `lastNrXi` is the prediction **for the upcoming half**, but `buildInningCapture` was called with the *just-ended* half's `(inning, half)` → the capture key described the wrong half.
+
+In the normal single-watcher flow this stayed hidden: the new half's correct-keyed capture fires a tick or two later at the leadoff PA (when `ls.isTopInning` has flipped), and the in-process `capturedInnings` dedup map already held the just-ended half's key from *its* earlier leadoff capture — so the off-by-one boundary write was a no-op. The dedup masked the latent bug.
+
+*Defect 2 — last-write-wins prediction upsert + ephemeral dedup map.* `lib/db/inning-predictions.ts` wrote the prediction row with a plain `upsert(predictionRow, { onConflict: "game_pk,inning,half" })` — **no `ignoreDuplicates`**, so PostgREST emitted `INSERT … ON CONFLICT … DO UPDATE` (last write wins). Meanwhile `capturedInnings` is deliberately NOT in `saveWatcherState`'s bundle (bug #12's later-refactor point 2), so on watcher restart the dedup map is empty.
+
+The two defects compound on a watcher restart mid-inning-break (Railway redeploy → `abort`, uncaught throw → `error`, or a budget-cap exit, then the supervisor's next cron — or any successor process — boots a fresh watcher while the feed is still in `inningState: "Middle"`). The successor's first tick re-fires the off-by-one boundary capture with a freshly-recomputed prediction, and last-write-wins lets it **overwrite** the prior watcher's correct row for the just-ended half with the *next* half's forecast. That overwritten row is exactly the "row labelled top-N holds a bot-N forecast" / "mid-game recompute, not start-of-half" symptom.
+
+**What was ruled out:**
+- The `buildInningCapture` clean-state predicate (`nrXi.startState.outs === 0 && (bases === 0 || bases === 2)`) is correct and unchanged — it never lets a genuinely mid-PA prediction through. The corruption was always a *clean-state* prediction for the wrong half, not a mid-PA snapshot.
+- `sweepFinalize` / `finalizeGame` are unaffected — `actual_runs` is filled by a separate keyed UPDATE (`updateActualRunsForHalf`), not the prediction upsert.
+
+**Fix — two minimal coupled changes:**
+
+1. **Key the capture by the upcoming half.** `services/run-watcher.ts` now calls `buildInningCapture({ inning: upcoming?.inning ?? null, half: upcoming?.half ?? null, ... })`. The row's `(inning, half)` now agrees with the half the prediction actually describes. This also makes the **boundary tick** (prior outs 2→3, new half fresh) the canonical first-write moment instead of the later leadoff-PA tick — precisely the "old game state was 2 outs, new game state is a brand-new inning" moment the prediction is meant to capture. `upcoming` is non-null here because the enclosing `if (status === "Live")` is only reached when `isLive` (which requires `upcoming !== null && upcoming.pitcherId !== null`) was true; the optional-chain is defensive and `buildInningCapture` already returns null on `inning == null || half == null`.
+2. **First-write-wins prediction insert.** `lib/db/inning-predictions.ts` adds `ignoreDuplicates: true` to the prediction-row upsert, matching the stub `games` insert. The successor watcher's re-fired capture is now a DB no-op, so the original first-of-the-half prediction persists unchanged.
+
+**Why this is safe:**
+- The capture content is unchanged; only the `(inning, half)` it's filed under and the DB conflict behavior changed.
+- `actual_runs` is still filled by `finalizeGame`'s keyed UPDATE — `ON CONFLICT DO NOTHING` on the prediction insert doesn't block it (the row already exists; the UPDATE targets it by PK).
+- `capturedInnings` keeps working as a within-watcher network-call optimization; it's just no longer the *primary* dedup guarantee — the DB conflict clause is. Re-adding it to `saveWatcherState` is unnecessary (DB-side dedup is authoritative) and would only re-inflate the per-tick Redis payload.
+- At the boundary tick the structural-reload phase has already refreshed `lineupStats` / pitcher cores / `defenseKey` for the upcoming half (`structuralKey` includes `upcoming.half|upcoming.inning`), so the captured context fields describe the upcoming half consistently with the prediction.
+
+**Don't change without thinking:**
+- The `buildInningCapture` call must pass `upcoming?.inning` / `upcoming?.half`, NOT raw `inning` / `half`. Reverting reintroduces the off-by-one-half key; the within-watcher `capturedInnings` dedup will mask it until the next restart-mid-break exposes a corrupted row.
+- The prediction-row insert must stay `ignoreDuplicates: true`. Reverting to a plain `upsert` reintroduces the cross-watcher-overwrite corruption. This now matches the stub `games` row's long-standing `ON CONFLICT DO NOTHING` (bug #12 later-refactor "Don't change" list, last bullet — that bullet's reasoning now applies to *both* writes in `upsertInningPrediction`).
+- The raw `inning` / `half` derivation at the top of the watcher loop still feeds `state.inning` / `state.half` (the dashboard snapshot) — only the capture call was switched to `upcoming`. Don't collapse the two.
+
+**Regression check:**
+- `npx tsc --noEmit` clean.
+- `npx vitest run` — 320/320 passing (37 files; +4 new in `lib/db/inning-predictions.test.ts`).
+- New `lib/db/inning-predictions.test.ts` mocks `./supabase` and asserts the prediction-row upsert options are exactly `{ onConflict: "game_pk,inning,half", ignoreDuplicates: true }` and the stub `games` insert keeps `{ onConflict: "game_pk", ignoreDuplicates: true }` — a future refactor can't silently revert either to last-write-wins.
+- `services/capture-inning.test.ts` unchanged and green — `buildInningCapture` is a pure function of its args; only the call site moved to `upcoming`.

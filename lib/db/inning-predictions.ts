@@ -39,12 +39,20 @@ export function gameStubContextFromState(state: GameState): GameStubContext {
 }
 
 // Per-half-inning write. Fire-and-forget — caller should `.catch(log.warn)`.
-// The supervisor sweep backstops any rows that don't make it.
+// The supervisor sweep backstops the games row / actual_runs; the prediction
+// row itself is only ever written here.
 //
-// Two sequential upserts, both individually idempotent so a partial failure
-// is safe. supabase-js doesn't expose multi-statement transactions, but the
-// games stub uses ignoreDuplicates so the prediction insert is the only
-// failure mode worth retrying — and the sweep handles that.
+// Two sequential inserts, BOTH insert-on-conflict-do-nothing
+// (`ignoreDuplicates: true`), so a partial failure is safe and the FIRST
+// write per key wins. The games stub is keyed on `game_pk`; the prediction
+// row on `(game_pk, inning, half)`. First-write-wins is load-bearing: the
+// caller fires this at the half-boundary tick (the first prediction computed
+// for the fresh half), and the in-memory `capturedInnings` dedup map is NOT
+// persisted across watcher restarts — so a successor watcher booting mid-
+// inning-break would otherwise re-fire the capture and overwrite the
+// original first prediction with a freshly-recomputed one. DO NOTHING on
+// conflict makes that re-fire a no-op. supabase-js doesn't expose multi-
+// statement transactions, but DO-NOTHING semantics make every retry safe.
 export async function upsertInningPrediction(args: {
   context: GameStubContext;
   capture: InningCapture;
@@ -92,7 +100,14 @@ export async function upsertInningPrediction(args: {
 
   const { error: predErr } = await sb
     .from("inning_predictions")
-    .upsert(predictionRow, { onConflict: "game_pk,inning,half" });
+    .upsert(predictionRow, {
+      onConflict: "game_pk,inning,half",
+      // First write wins — see the function docstring. A successor watcher
+      // re-firing this capture after a restart must NOT clobber the original
+      // first-of-the-half prediction. actual_runs is filled separately by
+      // finalizeGame via UPDATE, so DO NOTHING here doesn't block it.
+      ignoreDuplicates: true,
+    });
   if (predErr) {
     throw new Error(`upsertInningPrediction: inning_predictions upsert failed — ${predErr.message}`);
   }
