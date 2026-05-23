@@ -138,28 +138,36 @@ export type WatcherResult = {
 };
 
 const SEASON = new Date().getUTCFullYear();
-// Loop ceiling sized to comfortably outlast a worst-case extra-inning MLB
-// game at the flat 2s live-polling cadence: 20000 × 2s ≈ 11h. A normal 3h
-// game runs ~5400 ticks; a 5h extra-inning game ~9000. Pre-game ticks at
-// the 30/5/1 min ramp add ~20 iterations across the 6h pre-game window, so
-// the live phase dominates. The cap exists only as defense against runaway
-// loops; the supervisor's 06:00 UTC idle-exit deadline (~18h post-cron) and
-// MAX_RUNTIME_MS are the real wall-clock ceilings. Historically MAX_LOOPS
-// was 1500 (≈2h at the legacy 5s cadence) and watchers hit it during the
-// late innings, exiting silently and leaving the dashboard's snapshot
-// stuck on a "Live" 9th — see `services/lib/finalize-game.ts` for the
-// graceful-exit cleanup that the budget exits now run.
+// Loop ceiling for the entire watcher lifetime. Worst case under the
+// two-phase budget below: pre-game ≤720 loops (12h × 1min if stuck Pre /
+// Delayed past scheduled first pitch) + active ≤11.1k (30min warmup at
+// 30s = 60, 6h marathon at 2s = 10800, 4h rain delay at the new 1min
+// Delayed cadence = 240) ≈ 11.8k of 20k = ~40% headroom. Pre-game's
+// share is ~3.6%, so a single total counter (vs splitting active/pregame)
+// is adequate. Historically MAX_LOOPS was 1500 (≈2h at the legacy 5s
+// cadence) and watchers hit it during the late innings — see
+// `services/lib/finalize-game.ts` for the graceful-exit cleanup.
 const MAX_LOOPS = 20000;
-// Hard wall-clock cap. With `PRE_GAME_LEAD_MS = 6h` in the supervisor, a
-// realistic max watcher lifetime is ~11h (6h pre-game + 5h game with
-// extras/delays). The supervisor's own idle-exit deadline (06:00 UTC next
-// day = ~18h after wake) caps any decoupled scenario. 20h leaves
-// comfortable margin without being absurd; the cap exists only as a
-// defense against a runaway watcher that outlives its parent. The
-// historical 6h cap fired immediately under the previous 24h pre-game
-// lead, flipping every scheduled game to synthetic Final via gracefulExit
-// before games even started — the regression that motivated this bump.
-const MAX_RUNTIME_MS = 20 * 60 * 60 * 1000;
+// Wall-clock cap for the ACTIVE phase only — measured from
+// `activeStartedAt` (set on the first Warmup or Live tick), NOT from
+// watcher spawn. Covers 30min warmup + 6h marathon + 4h rain delay +
+// ~5h margin. Decoupling from spawn means pre-game length (the 6h
+// scheduled lead, or any pre-game rain delay) can never erode the
+// game's budget. Previously this was 20h measured from spawn; under
+// that scheme an unusually long pre-game (delayed start, doubleheader
+// g2 stale gameDate, MLB schedule glitch) directly shrank the game-
+// phase window.
+const MAX_RUNTIME_MS = 16 * 60 * 60 * 1000;
+// Wall-clock cap for the PRE-GAME phase — measured from watcher spawn.
+// With PRE_GAME_LEAD_MS = 6h this gives 6h of slack past scheduled first
+// pitch before the watcher exits gracefully. Long enough for typical
+// pre-game rain delays (most resolve within ~3h or are postponed);
+// short enough that a truly postponed game doesn't hold the watcher
+// indefinitely. The exit reuses `gracefulExit("max-runtime")` —
+// performGracefulExit already skips the synthetic-Final publish when
+// `lastPublishedState.status === "Pre"` (BUGS.md bug #11), so a stuck-
+// Pre exit correctly does NOT flip the Scheduled card to "Finished".
+const MAX_PREGAME_MS = 12 * 60 * 60 * 1000;
 
 // Run a single game's watcher loop to completion (Final or abort). Designed
 // to live inside a long-running Node process (Railway, Fly.io, or local dev
@@ -225,6 +233,16 @@ export async function runWatcher(
     let defenseCache: Awaited<ReturnType<typeof loadDefenseStep>> | null = null;
     let oppHalfCleanCache: { pHitEvent: number; pNoHitEvent: number } | null = null;
     let lastNrXi: Awaited<ReturnType<typeof computeNrXiStep>> | null = restored.lastNrXi;
+    // Flips true after the first successful pre-game compute (Phase 2 produces
+    // a prediction and `publishUpdateStep` succeeds). Once true, the Pre-state
+    // sleep branch goes into a single long idle sleep until ~T-35min from
+    // scheduled first pitch — no further polling, no further compute, no
+    // further publishes — so the watcher is truly idle from "first compute"
+    // to "warmup". Derived from restored.lastNrXi on init so a restarted
+    // watcher with a saved prediction inherits the idle state instead of
+    // re-firing the pre-game ramp. Not persisted via saveWatcherState —
+    // lastNrXi already is, and that's the only signal needed.
+    let pregameComputeDone = restored.lastNrXi !== null;
     let lastEnv = restored.lastEnv;
     let lastPitcherId = restored.lastPitcherId;
     let lastPitcherName = restored.lastPitcherName;
@@ -248,6 +266,15 @@ export async function runWatcher(
     let lastPublishedState: GameState | null = null;
 
     const startedAt = Date.now();
+    // Set once on the first tick the game is warming up or live. The
+    // runtime budget for "active tracking" (MAX_RUNTIME_MS) is measured
+    // from this moment, so pre-game duration (6h scheduled lead + any
+    // pre-game rain delay) never erodes the budget for the game itself.
+    // Per-watcher only — not persisted across restarts; a restarted
+    // watcher mid-game will re-arm activeStartedAt to "now" on its next
+    // Warmup/Live tick. While null, the pre-game cap (MAX_PREGAME_MS,
+    // from `startedAt`) governs instead.
+    let activeStartedAt: number | null = null;
 
     // Best-effort cleanup invoked from every non-Final exit path: the budget
     // caps (max-loops / max-runtime), supervisor abort (SIGTERM), and any
@@ -285,7 +312,19 @@ export async function runWatcher(
         await gracefulExit("abort");
         return { reason: "aborted" };
       }
-      if (Date.now() - startedAt > MAX_RUNTIME_MS) {
+      if (activeStartedAt === null) {
+        // Pre-game: only the spawn-anchored cap applies. A stuck-Pre /
+        // postponed game exits gracefully here without flipping the
+        // Scheduled card to Finished (performGracefulExit skips the
+        // synthetic-Final publish for Pre-state lastPublishedState).
+        if (Date.now() - startedAt > MAX_PREGAME_MS) {
+          log.warn("watcher", "max-pregame", { gamePk: input.gamePk, loop });
+          await gracefulExit("max-runtime");
+          return { reason: "max-runtime" };
+        }
+      } else if (Date.now() - activeStartedAt > MAX_RUNTIME_MS) {
+        // Active: cap measured from first Warmup/Live tick so pre-game
+        // length never erodes the game's budget.
         log.warn("watcher", "max-runtime", { gamePk: input.gamePk, loop });
         await gracefulExit("max-runtime");
         return { reason: "max-runtime" };
@@ -304,6 +343,19 @@ export async function runWatcher(
           tick.feed.gameData.status.detailedState,
           tick.feed.gameData.status.abstractGameState,
         );
+        const detailedState = tick.feed.gameData.status.detailedState ?? "";
+        // Arm the active-phase clock the first time the game is warming
+        // up or live. Setting on "Live" too (not only Warmup) covers
+        // late-spawn / restart scenarios and any MLB tick that skips
+        // the Warmup detailedState.
+        if (activeStartedAt === null && (status === "Live" || detailedState === "Warmup")) {
+          activeStartedAt = Date.now();
+          log.info("watcher", "active-start", {
+            gamePk: input.gamePk,
+            status,
+            detailedState,
+          });
+        }
         const ls = tick.feed.liveData.linescore;
         const inning = ls.currentInning ?? null;
         const half: "Top" | "Bottom" | null =
@@ -770,6 +822,17 @@ export async function runWatcher(
         // zombie from the dashboard.
         lastPublishedState = state;
 
+        // First successful pre-game compute landed on the dashboard — the
+        // Pre-state sleep branch will now go idle until ~T-35min from
+        // scheduled first pitch. A late lineup scratch in that window won't
+        // be reflected until the wake; the trade-off is the user's explicit
+        // ask ("worker not active doing anything at all from first compute
+        // to warmup"). Once Warmup or Live arrives, normal polling resumes.
+        if (!pregameComputeDone && status === "Pre" && lastNrXi !== null) {
+          pregameComputeDone = true;
+          log.info("watcher", "pregame-compute-done", { gamePk: input.gamePk });
+        }
+
         // Persist hoisted state once per tick. The trigger keys are deliberately
         // skipped (see watcher-state.ts) so a restart fires one Phase 1 reload.
         // `capturedInnings` is intentionally NOT serialized — predictions are
@@ -825,18 +888,48 @@ export async function runWatcher(
 
         let waitSec = 30;
         if (status === "Live") waitSec = tick.recommendedWaitSeconds;
+        // MLB's "Warmup" detailedState (~30 min before first pitch) classifies
+        // as "Pre" via classifyStatus, but we want to fast-poll it so the
+        // Warmup→Live transition surfaces within 30s instead of up to 5 min
+        // (or 1 min in the final-5 ramp). Must come before the `status==="Pre"`
+        // branch since Warmup satisfies that too.
+        else if (detailedState === "Warmup") waitSec = 30;
         else if (status === "Pre") {
-          // Ramp toward first pitch so the Pre→Live transition surfaces
-          // within ~1 min instead of up to 30 min. Tightening cadence in the
-          // last 30 min also lets pre-game-compute previews land faster.
           const startIso = tick.feed.gameData.datetime?.dateTime;
           const startMs = startIso ? Date.parse(startIso) : Number.NaN;
           const msToStart = Number.isFinite(startMs) ? startMs - Date.now() : Number.POSITIVE_INFINITY;
-          if (msToStart <= 5 * 60_000) waitSec = 60;
-          else if (msToStart <= 30 * 60_000) waitSec = 300;
-          else waitSec = 1800;
+          if (pregameComputeDone) {
+            // First-inning preview is already on the dashboard. Idle in one
+            // long sleep until ~T-35min from scheduled first pitch — typical
+            // Warmup detailedState appears ~T-30min, so this resumes polling
+            // with a 5min buffer. After the wake, msUntilWarmupPoll ≤ 60s
+            // drops us to a 60s cadence to catch Warmup within the minute;
+            // the Warmup short-circuit branch above then takes over at 30s.
+            // Capped at 4h per sleep so the runtime check + status re-poll
+            // get a heartbeat even when scheduled time is far out. Unknown
+            // start time falls back to a 30min cadence so we never block.
+            const MAX_IDLE_SEC = 4 * 60 * 60;
+            const msUntilWarmupPoll = msToStart - 35 * 60_000;
+            if (!Number.isFinite(msToStart)) waitSec = 1800;
+            else if (msUntilWarmupPoll > 60_000)
+              waitSec = Math.min(MAX_IDLE_SEC, Math.floor(msUntilWarmupPoll / 1000));
+            else waitSec = 60;
+          } else {
+            // Pre-first-compute: keep tight cadence so the moment lineups +
+            // probable pitchers post (typically T-1h to T-3h), the first
+            // compute fires and we can drop into the idle branch above.
+            if (msToStart <= 5 * 60_000) waitSec = 60;
+            else if (msToStart <= 30 * 60_000) waitSec = 300;
+            else waitSec = 1800;
+          }
         }
-        else if (status === "Delayed" || status === "Suspended") waitSec = 300;
+        // Rain delay: poll every 1min so the resume surfaces quickly. Cheap
+        // on the active-loop budget — 4h × 1min = 240 ticks.
+        else if (status === "Delayed") waitSec = 60;
+        // Suspended / Postponed: may not resume for hours or days; 5min stays
+        // to avoid wasted polls. A postponed-at-spawn watcher is bounded by
+        // MAX_PREGAME_MS; an in-game suspension by MAX_RUNTIME_MS from active.
+        else if (status === "Suspended") waitSec = 300;
 
         // sleepMs throws AbortError on abort — caught by the outer try/catch
         // below, which routes to gracefulExit("abort"). Other errors here
